@@ -289,6 +289,19 @@ def sanitize_filename_human(name: str) -> str:
     name = name.replace("/", "_")
     return re.sub(r'[<>:"\\|?*]', "", name)
 
+
+def normalize_target_filename(name: str) -> str:
+    """Normalize a user-provided filename before saving.
+
+    - Strip whitespace
+    - Remove Windows-forbidden characters
+    - Ensure the name ends with .pdf (case-insensitive)
+    """
+    cleaned = sanitize_filename_human(name.strip())
+    if cleaned and not cleaned.lower().endswith(".pdf"):
+        cleaned += ".pdf"
+    return cleaned
+
 def build_filename(
     parties: list[str],
     cases: list[str],
@@ -723,7 +736,8 @@ class RenamerGUI(QWidget):
         inp = os.path.join(self.input_edit.text(), pdf_name)
 
         proposed = self.file_table.item(self.current_index, 1)
-        target_name = proposed.text() if proposed else self.filename_edit.text()
+        target_name_raw = proposed.text() if proposed else self.filename_edit.text()
+        target_name = normalize_target_filename(target_name_raw)
         if not target_name:
             QMessageBox.warning(self, "Error", "Proposed filename is empty.")
             return
@@ -759,7 +773,10 @@ class RenamerGUI(QWidget):
                 self.current_index = idx
                 self.apply_cached_result(idx, self.file_results[idx])
                 proposed_item = self.file_table.item(idx, 1)
-                target_name = proposed_item.text() if proposed_item else result.get("filename", pdf_name)
+                raw_name = proposed_item.text() if proposed_item else result.get("filename", pdf_name)
+                target_name = normalize_target_filename(raw_name)
+                if not target_name:
+                    raise ValueError(f"Empty or invalid filename for {pdf_name}")
                 self.file_results[idx]["filename"] = target_name
 
                 inp_path = os.path.join(self.input_edit.text(), pdf_name)
@@ -909,7 +926,8 @@ class RenamerGUI(QWidget):
         if self.current_index >= self.file_table.rowCount():
             return
 
-        current_text = self.filename_edit.text()
+        current_text = normalize_target_filename(self.filename_edit.text())
+        self.filename_edit.setText(current_text)
         self.file_table.setItem(self.current_index, 1, QTableWidgetItem(current_text))
 
         if self.current_index in self.file_results:
