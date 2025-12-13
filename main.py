@@ -17,6 +17,7 @@ import tempfile
 import glob
 import threading
 import requests
+from urllib.parse import urljoin
 from dataclasses import dataclass
 
 from PIL import Image
@@ -31,6 +32,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434/")
 
 from openai import OpenAI
 client = OpenAI(api_key=API_KEY)
@@ -364,12 +366,13 @@ def extract_metadata_ollama(text: str, prompt: str) -> dict:
         ],
         "stream": False,
     }
+    endpoint = urljoin(OLLAMA_HOST if OLLAMA_HOST.endswith("/") else OLLAMA_HOST + "/", "api/chat")
     try:
-        resp = requests.post("http://127.0.0.1:11434/api/chat", json=payload, timeout=60)
+        resp = requests.post(endpoint, json=payload, timeout=60)
         resp.raise_for_status()
     except requests.RequestException as e:
         raise RuntimeError(
-            "Unable to reach Ollama at http://127.0.0.1:11434. Start the Ollama server or switch AI backend."
+            f"Unable to reach Ollama at {endpoint}. Configure OLLAMA_HOST or switch AI backend."
         ) from e
 
     data = resp.json()
