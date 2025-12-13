@@ -21,7 +21,8 @@ import pytesseract
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
-    QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox
+    QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
+    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem
 )
 from PyQt6.QtCore import Qt
 
@@ -142,7 +143,7 @@ def sanitize_case_number(case: str) -> str:
     """Replace only '/' with '_' in case numbers."""
     return case.replace("/", "_")
 
-def extract_text_ocr(pdf_path: str) -> str:
+def extract_text_ocr(pdf_path: str, max_chars: int = 1500) -> str:
     pdf_path = os.path.normpath(pdf_path)  # <<< CRITICAL FIX
     """
     OCR first page at 300 DPI using pdftoppm + Tesseract.
@@ -184,7 +185,7 @@ def extract_text_ocr(pdf_path: str) -> str:
             lang="pol+eng",
         )
 
-        return text[:1500]
+        return text[:max_chars]
 
     except Exception as e:
         log_exception(e)
@@ -303,14 +304,46 @@ def sanitize_filename_human(name: str) -> str:
     name = name.replace("/", "_")
     return re.sub(r'[<>:"\\|?*]', "", name)
 
-def build_filename(parties: list[str], cases: list[str], letter_type: str) -> str:
-    parties = normalize_parties(parties)
-    party_part = join_parties(parties)
-    case_part = format_case_numbers(cases)
+def build_filename(
+    plaintiff_parties: list[str],
+    defendant_parties: list[str],
+    cases: list[str],
+    letter_type: str,
+    include_plaintiff: bool = True,
+    include_defendant: bool = True,
+    include_cases: bool = True,
+    include_letter_type: bool = True,
+) -> str:
+    segments = []
 
-    lt = (letter_type or "unknown").strip()
+    if include_plaintiff or include_defendant:
+        parties: list[str] = []
 
-    filename = f"{party_part} - {case_part} - {lt}.pdf"
+        if include_plaintiff:
+            parties.extend(plaintiff_parties)
+        if include_defendant:
+            parties.extend(defendant_parties)
+
+        if not parties:
+            parties = choose_party({
+                "plaintiff": plaintiff_parties,
+                "defendant": defendant_parties,
+            })
+
+        normalized = normalize_parties(parties)
+        segments.append(join_parties(normalized))
+
+    if include_cases:
+        segments.append(format_case_numbers(cases))
+
+    if include_letter_type:
+        lt = (letter_type or "unknown").strip()
+        segments.append(lt)
+
+    if not segments:
+        segments.append("UNNAMED")
+
+    filename = " - ".join(segments) + ".pdf"
     return sanitize_filename_human(filename)
 
 # ==========================================================
@@ -367,17 +400,54 @@ class RenamerGUI(QWidget):
         h3.addWidget(self.type_box)
         layout.addLayout(h3)
 
-        # OCR preview
-        layout.addWidget(QLabel("OCR Preview:"))
-        self.ocr_view = QTextEdit()
-        self.ocr_view.setReadOnly(True)
-        layout.addWidget(self.ocr_view)
+        # OCR options
+        h3b = QHBoxLayout()
+        self.run_ocr_checkbox = QCheckBox("Run OCR")
+        self.run_ocr_checkbox.setChecked(True)
+        h3b.addWidget(self.run_ocr_checkbox)
+
+        h3b.addWidget(QLabel("Max characters:"))
+        self.char_limit_spin = QSpinBox()
+        self.char_limit_spin.setRange(100, 10000)
+        self.char_limit_spin.setSingleStep(100)
+        self.char_limit_spin.setValue(1500)
+        h3b.addWidget(self.char_limit_spin)
+
+        self.char_count_label = QLabel("Characters retrieved: 0")
+        h3b.addWidget(self.char_count_label)
+        layout.addLayout(h3b)
+
+        # Filename components
+        h3c = QHBoxLayout()
+        h3c.addWidget(QLabel("Include in filename:"))
+        self.include_plaintiff_cb = QCheckBox("Plaintiff")
+        self.include_plaintiff_cb.setChecked(True)
+        self.include_defendant_cb = QCheckBox("Defendant")
+        self.include_defendant_cb.setChecked(True)
+        self.include_cases_cb = QCheckBox("Case numbers")
+        self.include_cases_cb.setChecked(True)
+        self.include_letter_cb = QCheckBox("Letter type")
+        self.include_letter_cb.setChecked(True)
+
+        h3c.addWidget(self.include_plaintiff_cb)
+        h3c.addWidget(self.include_defendant_cb)
+        h3c.addWidget(self.include_cases_cb)
+        h3c.addWidget(self.include_letter_cb)
+        layout.addLayout(h3c)
 
         # AI metadata preview
         layout.addWidget(QLabel("Extracted metadata:"))
         self.meta_view = QTextEdit()
         self.meta_view.setReadOnly(True)
         layout.addWidget(self.meta_view)
+
+        # PDF list with proposals
+        layout.addWidget(QLabel("PDFs in folder:"))
+        self.pdf_table = QTableWidget(0, 2)
+        self.pdf_table.setHorizontalHeaderLabels(["PDF", "Proposed filename"])
+        self.pdf_table.horizontalHeader().setStretchLastSection(True)
+        self.pdf_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.pdf_table)
 
         # Filename editing
         h4 = QHBoxLayout()
@@ -456,6 +526,12 @@ class RenamerGUI(QWidget):
         self.pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
         self.current_index = 0
 
+        self.pdf_table.setRowCount(0)
+        for row, pdf in enumerate(self.pdf_files):
+            self.pdf_table.insertRow(row)
+            self.pdf_table.setItem(row, 0, QTableWidgetItem(pdf))
+            self.pdf_table.setItem(row, 1, QTableWidgetItem(""))
+
         if not self.pdf_files:
             QMessageBox.information(self, "Info", "No PDFs found in folder.")
             return
@@ -475,11 +551,15 @@ class RenamerGUI(QWidget):
         pdf_path = os.path.join(folder, pdf)
 
         # OCR
-        self.ocr_text = extract_text_ocr(pdf_path)
-        self.ocr_view.setText(self.ocr_text)
+        if self.run_ocr_checkbox.isChecked():
+            self.ocr_text = extract_text_ocr(pdf_path, self.char_limit_spin.value())
+        else:
+            self.ocr_text = ""
+
+        self.char_count_label.setText(f"Characters retrieved: {len(self.ocr_text)}")
 
         # AI extraction
-        raw = call_model(self.ocr_text)
+        raw = call_model(self.ocr_text) if self.ocr_text else "{}"
         try:
             self.meta = json.loads(raw)
         except Exception:
@@ -497,13 +577,27 @@ class RenamerGUI(QWidget):
         if selected_type:
             self.meta["letter_type"] = selected_type
 
-        party = choose_party(self.meta)
+        plaintiffs = self.meta.get("plaintiff", [])
+        defendants = self.meta.get("defendant", [])
         cases = self.meta.get("case_numbers", [])
         lt = self.meta.get("letter_type", "Unknown")
 
-        filename = build_filename(party, cases, lt)
+        filename = build_filename(
+            plaintiffs,
+            defendants,
+            cases,
+            lt,
+            include_plaintiff=self.include_plaintiff_cb.isChecked(),
+            include_defendant=self.include_defendant_cb.isChecked(),
+            include_cases=self.include_cases_cb.isChecked(),
+            include_letter_type=self.include_letter_cb.isChecked(),
+        )
         self.filename_edit.setText(filename)
         filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+        # Update table preview
+        if 0 <= self.current_index < self.pdf_table.rowCount():
+            self.pdf_table.setItem(self.current_index, 1, QTableWidgetItem(filename))
 
     # ------------------------------------------------------
     # Button handlers
@@ -534,7 +628,8 @@ class RenamerGUI(QWidget):
     def process_all_files_safe(self):
         for idx, pdf_path in enumerate(self.pdf_files):
             try:
-                self.process_current_file(pdf_path)
+                self.current_index = idx
+                self.process_current_file()
             except Exception as e:
                 log_exception(e)
                 QMessageBox.warning(
@@ -553,8 +648,8 @@ class RenamerGUI(QWidget):
         if not self.pdf_files:
             return
 
-        for pdf_name in self.pdf_files[:]:  # iterate over COPY
-            self.current_index = i
+        for idx, pdf_name in enumerate(self.pdf_files[:]):  # iterate over COPY
+            self.current_index = idx
             self.process_current_file()
 
             inp = os.path.join(self.input_edit.text(), pdf_name)
