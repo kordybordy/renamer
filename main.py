@@ -305,10 +305,12 @@ def sanitize_filename_human(name: str) -> str:
     return re.sub(r'[<>:"\\|?*]', "", name)
 
 def build_filename(
-    parties: list[str],
+    plaintiff_parties: list[str],
+    defendant_parties: list[str],
     cases: list[str],
     letter_type: str,
-    include_parties: bool = True,
+    include_plaintiff: bool = True,
+    include_defendant: bool = True,
     include_cases: bool = True,
     include_letter_type: bool = True,
 ) -> str:
