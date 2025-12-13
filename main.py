@@ -1,5 +1,5 @@
 # ==========================================================
-# PyQt6 GUI PDF Renamer — OCR + AI (GPT-5-nano / GPT-4.1-mini)
+# PyQt5 GUI PDF Renamer — OCR + AI (GPT-5-nano / GPT-4.1-mini)
 # Human-format filenames (comma-separated parties, Polish letters preserved)
 # ==========================================================
 
@@ -19,11 +19,11 @@ import glob
 from PIL import Image
 import pytesseract
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox
 )
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
 from openai import OpenAI
 client = OpenAI(api_key=API_KEY)
@@ -531,7 +531,7 @@ class RenamerGUI(QWidget):
         shutil.move(inp, out)
         QMessageBox.information(self, "Done", f"Renamed:\n{out}")
 
-    def process_all_files(self):
+    def process_all_files_safe(self):
         for idx, pdf_path in enumerate(self.pdf_files):
             try:
                 self.process_current_file(pdf_path)
