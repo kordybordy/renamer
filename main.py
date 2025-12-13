@@ -785,6 +785,7 @@ class RenamerGUI(QWidget):
             meta["letter_type"] = self.type_box.currentText()
 
         party = self.pick_party_from_meta(meta)
+        party = choose_party(meta)
         cases = meta.get("case_numbers", [])
         lt = meta.get("letter_type", "Unknown")
 
@@ -811,6 +812,7 @@ class RenamerGUI(QWidget):
 
         self.ocr_view.setText(self.ocr_text)
         self.update_ocr_visibility()
+        self.ocr_view.setVisible(bool(self.ocr_text))
         self.meta_view.setText(json.dumps(self.meta, indent=2, ensure_ascii=False))
         self.filename_edit.setText(cached.get("filename", ""))
         self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
