@@ -336,14 +336,24 @@ def normalize_target_filename(name: str) -> str:
     return cleaned
 
 
+def parse_json_content(content: str, source: str) -> dict:
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        snippet = (content or "").strip()[:120]
+        raise ValueError(
+            f"{source} did not return valid JSON. Received: '{snippet or 'empty response'}'"
+        ) from e
+
+
 def extract_metadata_openai(text: str, prompt: str) -> dict:
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",
         temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    content = resp.choices[0].message.content or ""
+    return parse_json_content(content, "OpenAI chat response")
 
 
 def extract_metadata_ollama(text: str, prompt: str) -> dict:
@@ -354,11 +364,17 @@ def extract_metadata_ollama(text: str, prompt: str) -> dict:
         ],
         "stream": False,
     }
-    resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
-    resp.raise_for_status()
+    try:
+        resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            "Unable to reach Ollama at http://localhost:11434. Start the Ollama server or switch AI backend."
+        ) from e
+
     data = resp.json()
     content = data.get("message", {}).get("content", "{}")
-    return json.loads(content)
+    return parse_json_content(content, "Ollama chat response")
 
 
 def extract_metadata(text: str) -> dict:
@@ -497,6 +513,7 @@ class RenamerGUI(QWidget):
         self.meta = {}
         self.file_results: dict[int, dict] = {}
         self.active_workers: dict[int, FileProcessWorker] = {}
+        self.failed_indices: set[int] = set()
         self.max_parallel_workers = 3
         self.stop_event = threading.Event()
 
@@ -765,6 +782,7 @@ class RenamerGUI(QWidget):
         self.current_index = 0
         self.file_results.clear()
         self.active_workers.clear()
+        self.failed_indices.clear()
 
         self.processing_enabled = False
 
@@ -850,6 +868,7 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
+        self.failed_indices.clear()
         self.processing_enabled = True
         self.start_parallel_processing()
 
@@ -869,6 +888,7 @@ class RenamerGUI(QWidget):
 
         self.active_workers.clear()
         self.file_results.clear()
+        self.failed_indices.clear()
 
         self.ocr_text = ""
         self.meta = {}
@@ -996,6 +1016,7 @@ class RenamerGUI(QWidget):
         self.active_workers.pop(index, None)
         if self.stop_event.is_set():
             return
+        self.failed_indices.add(index)
         QMessageBox.critical(self, "Error", f"Failed processing file at index {index}: {error}")
         self.start_parallel_processing()
 
@@ -1091,6 +1112,8 @@ class RenamerGUI(QWidget):
     def start_worker_for_index(self, index: int, pdf_path: str):
         if self.stop_event.is_set():
             return
+        if index in self.failed_indices:
+            return
         if index in self.active_workers or index in self.file_results:
             return
 
@@ -1122,7 +1145,7 @@ class RenamerGUI(QWidget):
         for idx in range(len(self.pdf_files)):
             if len(self.active_workers) >= self.max_parallel_workers:
                 break
-            if idx in self.file_results or idx in self.active_workers:
+            if idx in self.file_results or idx in self.active_workers or idx in self.failed_indices:
                 continue
             pdf_path = os.path.join(self.input_edit.text(), self.pdf_files[idx])
             self.start_worker_for_index(idx, pdf_path)
