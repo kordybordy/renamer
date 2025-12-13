@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 import glob
 import threading
+import requests
+from dataclasses import dataclass
 
 from PIL import Image
 import pytesseract
@@ -23,9 +25,12 @@ import pytesseract
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
-    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView
+    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QTabWidget, QRadioButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+
+AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 
 from openai import OpenAI
 client = OpenAI(api_key=API_KEY)
@@ -43,6 +48,18 @@ FILENAME_RULES = {
     "force_letter_type": True,        # GUI overrides AI letter type
     "default_letter_type": "pozew",   # fallback if AI unsure
 }
+
+
+@dataclass
+class NamingOptions:
+    include_parties: bool = True
+    include_case_numbers: bool = True
+    include_letter_type: bool = True
+    party_mode: str = "opposing"  # opposing | plaintiff | defendant
+    ocr_enabled: bool = True
+    ocr_char_limit: int = 1500
+    ocr_dpi: int = 300
+    prompt_template: str = DEFAULT_PROMPT
 
 # ===============================
 # Logging
@@ -113,28 +130,67 @@ TESSDATA_DIR = configure_tesseract()
 print("[DEBUG] Using tessdata:", TESSDATA_DIR)
 
 # ==========================================================
-# AI SYSTEM PROMPT — returns structured JSON
+# AI PROMPTING
 # ==========================================================
 
-SYSTEM_PROMPT = """
-Return strict JSON in this exact shape:
-
+OUTPUT_SCHEMA = """
 {
-  "plaintiff": ["Name Surname", ...],
-  "defendant": ["Name Surname", ...],
-  "case_numbers": ["I C 1234/25", ...],
-  "letter_type": "Pozew" | "Kontrpozew" | "Pozew + Postanowienie" |
-                  "Postanowienie" | "Portal" | "Korespondencja" |
-                  "Unknown"
+  "plaintiff": ["Name Surname", "..."],
+  "defendant": ["Name Surname", "..."],
+  "case_numbers": ["I C 1234/25", "..."],
+  "letter_type": "pozew | postanowienie | wezwanie | odpowiedz_na_pozew | wniosek | unknown"
+}
+"""
+
+DEFAULT_PROMPT = """
+Extract the requested legal metadata from the following OCR text.
+Return strict JSON exactly matching this schema:
+{SCHEMA}
+
+OCR text:
+{TEXT}
+"""
+
+PROMPT_FLAGS_DEFAULT = {
+    "plaintiff": True,
+    "defendant": True,
+    "case_numbers": True,
+    "letter_type": True,
+    "raiffeisen_rule": True,
 }
 
-Rules:
-- Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
-- Extract ALL case numbers.
-- Preserve Polish letters.
-- Infer letter type according to content.
-- No commentary. Output JSON only.
-"""
+PROMPT_CONTEXT = {
+    "template": DEFAULT_PROMPT,
+    "flags": PROMPT_FLAGS_DEFAULT.copy(),
+}
+
+
+def set_prompt_context(template: str, flags: dict):
+    PROMPT_CONTEXT["template"] = template or DEFAULT_PROMPT
+    PROMPT_CONTEXT["flags"] = {**PROMPT_FLAGS_DEFAULT, **(flags or {})}
+
+
+def build_prompt(text: str) -> str:
+    template = PROMPT_CONTEXT.get("template", DEFAULT_PROMPT)
+    flags = PROMPT_CONTEXT.get("flags", PROMPT_FLAGS_DEFAULT)
+
+    directives = []
+    if flags.get("plaintiff"):
+        directives.append("- Extract plaintiffs.")
+    if flags.get("defendant"):
+        directives.append("- Extract defendants.")
+    if flags.get("case_numbers"):
+        directives.append("- Extract case numbers.")
+    if flags.get("letter_type"):
+        directives.append("- Determine letter type.")
+    if flags.get("raiffeisen_rule"):
+        directives.append("- Apply Raiffeisen exclusion (opposing side is relevant).")
+
+    prefix = "\n".join(directives)
+    prompt_body = template.replace("{SCHEMA}", OUTPUT_SCHEMA).replace("{TEXT}", text)
+    if prefix:
+        return prefix + "\n\n" + prompt_body
+    return prompt_body
 
 # ==========================================================
 # Helpers
@@ -144,7 +200,7 @@ def sanitize_case_number(case: str) -> str:
     """Replace only '/' with '_' in case numbers."""
     return case.replace("/", "_")
 
-def extract_text_ocr(pdf_path: str, max_chars: int = 1500) -> str:
+def extract_text_ocr(pdf_path: str, max_chars: int = 1500, dpi: int = 300) -> str:
     pdf_path = os.path.normpath(pdf_path)  # <<< CRITICAL FIX
     """
     OCR first page at 300 DPI using pdftoppm + Tesseract.
@@ -159,7 +215,7 @@ def extract_text_ocr(pdf_path: str, max_chars: int = 1500) -> str:
             PDFTOPPM_EXE,
             "-f", "1",
             "-l", "1",
-            "-r", "300",
+            "-r", str(dpi),
             "-png",
             pdf_path,
             out_prefix
@@ -194,30 +250,6 @@ def extract_text_ocr(pdf_path: str, max_chars: int = 1500) -> str:
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-def call_model(text: str) -> str:
-    """Try GPT-5-nano → fallback GPT-4.1-mini."""
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-5-nano",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ]
-        )
-        return resp.choices[0].message.content
-    except Exception:
-        pass
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text}
-        ]
-    )
-    return resp.choices[0].message.content
 
 def choose_party(meta: dict):
     """Return opposing party if Raiffeisen is involved; otherwise plaintiff or defendant."""
@@ -302,25 +334,75 @@ def normalize_target_filename(name: str) -> str:
         cleaned += ".pdf"
     return cleaned
 
-def build_filename(
-    parties: list[str],
-    cases: list[str],
-    letter_type: str,
-    include_parties: bool = True,
-    include_cases: bool = True,
-    include_letter_type: bool = True,
-    **_ignored,
-) -> str:
+
+def extract_metadata_openai(text: str, prompt: str) -> dict:
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    content = resp.choices[0].message.content
+    return json.loads(content)
+
+
+def extract_metadata_ollama(text: str, prompt: str) -> dict:
+    payload = {
+        "model": "llama3.1",
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }
+    resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("message", {}).get("content", "{}")
+    return json.loads(content)
+
+
+def extract_metadata(text: str) -> dict:
+    prompt = build_prompt(text)
+    backend = AI_BACKEND
+    last_error = None
+    if backend in ("ollama", "auto"):
+        try:
+            return extract_metadata_ollama(text, prompt)
+        except Exception as e:
+            last_error = e
+            if backend == "ollama":
+                raise
+    if backend in ("openai", "auto"):
+        try:
+            return extract_metadata_openai(text, prompt)
+        except Exception as e:
+            last_error = e
+    if last_error:
+        raise last_error
+    return {}
+
+def select_parties(meta: dict, options: NamingOptions) -> list[str]:
+    if options.party_mode == "plaintiff":
+        return meta.get("plaintiff", []) or ["Unknown"]
+    if options.party_mode == "defendant":
+        return meta.get("defendant", []) or ["Unknown"]
+    return choose_party(meta)
+
+
+def build_filename(meta: dict, options: NamingOptions) -> str:
+    parties = select_parties(meta, options) if options.include_parties else []
+    cases = meta.get("case_numbers", []) if options.include_case_numbers else []
+    letter_type = meta.get("letter_type", "unknown") if options.include_letter_type else ""
+
     segments = []
 
-    if include_parties:
+    if parties:
         normalized = normalize_parties(parties)
         segments.append(join_parties(normalized))
 
-    if include_cases:
+    if cases:
         segments.append(format_case_numbers(cases))
 
-    if include_letter_type:
+    if letter_type:
         lt = (letter_type or "unknown").strip()
         segments.append(lt)
 
@@ -342,72 +424,51 @@ class FileProcessWorker(QThread):
         self,
         index: int,
         pdf_path: str,
-        run_ocr: bool,
-        char_limit: int,
-        include_parties: bool,
-        include_cases: bool,
-        include_letter_type: bool,
+        options: NamingOptions,
+        prompt_flags: dict,
         selected_letter_type: str,
-        prefer_plaintiff: bool,
-        prefer_defendant: bool,
         stop_event: threading.Event,
     ):
         super().__init__()
         self.index = index
         self.pdf_path = pdf_path
-        self.run_ocr = run_ocr
-        self.char_limit = char_limit
-        self.include_parties = include_parties
-        self.include_cases = include_cases
-        self.include_letter_type = include_letter_type
+        self.options = options
+        self.prompt_flags = prompt_flags or {}
         self.selected_letter_type = selected_letter_type
-        self.prefer_plaintiff = prefer_plaintiff
-        self.prefer_defendant = prefer_defendant
         self.stop_event = stop_event
 
     def run(self):
         try:
             if self.stop_event.is_set():
                 return
-            ocr_text = extract_text_ocr(self.pdf_path, self.char_limit) if self.run_ocr else ""
+            ocr_text = extract_text_ocr(
+                self.pdf_path,
+                self.options.ocr_char_limit,
+                self.options.ocr_dpi,
+            ) if self.options.ocr_enabled else ""
 
             if self.stop_event.is_set():
                 return
 
-            raw = call_model(ocr_text) if ocr_text else "{}"
-            try:
-                meta = json.loads(raw)
-            except Exception:
-                meta = {
-                    "plaintiff": [],
-                    "defendant": [],
-                    "case_numbers": [],
-                    "letter_type": "Unknown",
-                }
+            set_prompt_context(self.options.prompt_template, self.prompt_flags)
+            meta = extract_metadata(ocr_text) if ocr_text else {
+                "plaintiff": [],
+                "defendant": [],
+                "case_numbers": [],
+                "letter_type": "unknown",
+            }
 
             if self.selected_letter_type:
                 meta["letter_type"] = self.selected_letter_type
 
-            if self.prefer_plaintiff:
-                party = meta.get("plaintiff", []) or ["Unknown"]
-            elif self.prefer_defendant:
-                party = meta.get("defendant", []) or ["Unknown"]
-            else:
-                party = choose_party(meta)
+            party = select_parties(meta, self.options)
             cases = meta.get("case_numbers", [])
-            lt = meta.get("letter_type", "Unknown")
+            lt = meta.get("letter_type", "unknown")
 
             if self.stop_event.is_set():
                 return
 
-            filename = build_filename(
-                party,
-                cases,
-                lt,
-                include_parties=self.include_parties,
-                include_cases=self.include_cases,
-                include_letter_type=self.include_letter_type,
-            )
+            filename = build_filename(meta, self.options)
 
             self.finished.emit(
                 self.index,
@@ -439,7 +500,18 @@ class RenamerGUI(QWidget):
         self.stop_event = threading.Event()
 
         # ---------- Layout ----------
-        layout = QVBoxLayout()
+        root_layout = QVBoxLayout()
+        self.tabs = QTabWidget()
+        self.main_tab = QWidget()
+        self.settings_tab = QWidget()
+        self.tabs.addTab(self.main_tab, "Main")
+        self.tabs.addTab(self.settings_tab, "AI & Filename Settings")
+        root_layout.addWidget(self.tabs)
+
+        self.main_layout = QVBoxLayout()
+        self.main_tab.setLayout(self.main_layout)
+        self.settings_layout = QVBoxLayout()
+        self.settings_tab.setLayout(self.settings_layout)
 
         # Input folder
         h1 = QHBoxLayout()
@@ -449,7 +521,7 @@ class RenamerGUI(QWidget):
         btn_input = QPushButton("Browse")
         btn_input.clicked.connect(self.choose_input)
         h1.addWidget(btn_input)
-        layout.addLayout(h1)
+        self.main_layout.addLayout(h1)
 
         # Output folder
         h2 = QHBoxLayout()
@@ -459,7 +531,7 @@ class RenamerGUI(QWidget):
         btn_output = QPushButton("Browse")
         btn_output.clicked.connect(self.choose_output)
         h2.addWidget(btn_output)
-        layout.addLayout(h2)
+        self.main_layout.addLayout(h2)
 
         # Type selector
         h3 = QHBoxLayout()
@@ -474,7 +546,7 @@ class RenamerGUI(QWidget):
             "Korespondencja"
         ])
         h3.addWidget(self.type_box)
-        layout.addLayout(h3)
+        self.main_layout.addLayout(h3)
 
         # OCR options
         h3b = QHBoxLayout()
@@ -489,6 +561,12 @@ class RenamerGUI(QWidget):
         self.char_limit_spin.setValue(1500)
         h3b.addWidget(self.char_limit_spin)
 
+        h3b.addWidget(QLabel("OCR DPI:"))
+        self.ocr_dpi_spin = QSpinBox()
+        self.ocr_dpi_spin.setRange(72, 600)
+        self.ocr_dpi_spin.setValue(300)
+        h3b.addWidget(self.ocr_dpi_spin)
+
         self.char_count_label = QLabel("Characters retrieved: 0")
         h3b.addWidget(self.char_count_label)
 
@@ -496,19 +574,20 @@ class RenamerGUI(QWidget):
         self.show_ocr_cb.setChecked(False)
         self.show_ocr_cb.toggled.connect(self.update_ocr_visibility)
         h3b.addWidget(self.show_ocr_cb)
-        layout.addLayout(h3b)
+        self.settings_layout.addLayout(h3b)
 
         # Party preference
         h3d = QHBoxLayout()
         h3d.addWidget(QLabel("Party to use:"))
-        self.use_plaintiff_cb = QCheckBox("Plaintiff")
-        self.use_defendant_cb = QCheckBox("Defendant")
-        self.use_plaintiff_cb.toggled.connect(self.handle_party_toggle)
-        self.use_defendant_cb.toggled.connect(self.handle_party_toggle)
-        h3d.addWidget(self.use_plaintiff_cb)
-        h3d.addWidget(self.use_defendant_cb)
+        self.party_opp_rb = QRadioButton("Opposing side only")
+        self.party_plaintiff_rb = QRadioButton("Plaintiff only")
+        self.party_defendant_rb = QRadioButton("Defendant only")
+        self.party_opp_rb.setChecked(True)
+        h3d.addWidget(self.party_opp_rb)
+        h3d.addWidget(self.party_plaintiff_rb)
+        h3d.addWidget(self.party_defendant_rb)
         h3d.addStretch()
-        layout.addLayout(h3d)
+        self.settings_layout.addLayout(h3d)
 
         # Filename components
         h3c = QHBoxLayout()
@@ -523,9 +602,50 @@ class RenamerGUI(QWidget):
         h3c.addWidget(self.include_parties_cb)
         h3c.addWidget(self.include_cases_cb)
         h3c.addWidget(self.include_letter_cb)
-        layout.addLayout(h3c)
+        self.settings_layout.addLayout(h3c)
+
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("AI Engine:"))
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems([
+            "OpenAI (cloud)",
+            "Local AI (Ollama)",
+            "Auto (Local → Cloud)",
+        ])
+        backend_row.addWidget(self.backend_combo)
+        backend_row.addStretch()
+        self.settings_layout.addLayout(backend_row)
+
+        self.settings_layout.addWidget(QLabel("AI Prompt Template"))
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlainText(DEFAULT_PROMPT)
+        self.settings_layout.addWidget(self.prompt_edit)
+
+        flags_row = QHBoxLayout()
+        self.flag_plaintiff_cb = QCheckBox("Extract plaintiffs")
+        self.flag_defendant_cb = QCheckBox("Extract defendants")
+        self.flag_cases_cb = QCheckBox("Extract case numbers")
+        self.flag_letter_cb = QCheckBox("Extract letter type")
+        self.flag_raiff_cb = QCheckBox("Apply Raiffeisen exclusion rule")
+        for cb in [
+            self.flag_plaintiff_cb,
+            self.flag_defendant_cb,
+            self.flag_cases_cb,
+            self.flag_letter_cb,
+            self.flag_raiff_cb,
+        ]:
+            cb.setChecked(True)
+            flags_row.addWidget(cb)
+        self.settings_layout.addLayout(flags_row)
+
+        reset_row = QHBoxLayout()
+        reset_btn = QPushButton("Reset prompt to default")
+        reset_btn.clicked.connect(self.reset_prompt)
+        reset_row.addWidget(reset_btn)
+        reset_row.addStretch()
+        self.settings_layout.addLayout(reset_row)
         
-        layout.addWidget(QLabel("Files and proposed names:"))
+        self.main_layout.addWidget(QLabel("Files and proposed names:"))
         self.file_table = QTableWidget(0, 2)
         self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -534,16 +654,16 @@ class RenamerGUI(QWidget):
         self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
         self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
         self.file_table.cellClicked.connect(self.on_row_selected)
-        layout.addWidget(self.file_table)
+        self.main_layout.addWidget(self.file_table)
 
         # OCR preview
         self.ocr_label = QLabel("OCR Preview:")
         self.ocr_label.setVisible(False)
-        layout.addWidget(self.ocr_label)
+        self.main_layout.addWidget(self.ocr_label)
         self.ocr_view = QTextEdit()
         self.ocr_view.setReadOnly(True)
         self.ocr_view.setVisible(False)
-        layout.addWidget(self.ocr_view)
+        self.main_layout.addWidget(self.ocr_view)
 
         # Filename editing
         h4 = QHBoxLayout()
@@ -551,7 +671,7 @@ class RenamerGUI(QWidget):
         self.filename_edit = QLineEdit()
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         h4.addWidget(self.filename_edit)
-        layout.addLayout(h4)
+        self.main_layout.addLayout(h4)
 
         play_row = QHBoxLayout()
         self.play_button = QPushButton("▶ Play (Generate Proposals)")
@@ -560,7 +680,7 @@ class RenamerGUI(QWidget):
         play_row.addStretch()
         play_row.addWidget(self.play_button)
         play_row.addStretch()
-        layout.addLayout(play_row)
+        self.main_layout.addLayout(play_row)
 
         # Buttons row
         h5 = QHBoxLayout()
@@ -588,9 +708,9 @@ class RenamerGUI(QWidget):
         h5.addWidget(btn_all)
         h5.addWidget(btn_stop)
         h5.addWidget(btn_quit)
-        layout.addLayout(h5)
+        self.main_layout.addLayout(h5)
 
-        self.setLayout(layout)
+        self.setLayout(root_layout)
 
         self.processing_enabled = False
 
@@ -658,6 +778,53 @@ class RenamerGUI(QWidget):
             return
 
         self.file_table.selectRow(0)
+
+    def reset_prompt(self):
+        self.prompt_edit.setPlainText(DEFAULT_PROMPT)
+        for cb in [
+            self.flag_plaintiff_cb,
+            self.flag_defendant_cb,
+            self.flag_cases_cb,
+            self.flag_letter_cb,
+            self.flag_raiff_cb,
+        ]:
+            cb.setChecked(True)
+
+    def get_prompt_flags(self) -> dict:
+        return {
+            "plaintiff": self.flag_plaintiff_cb.isChecked(),
+            "defendant": self.flag_defendant_cb.isChecked(),
+            "case_numbers": self.flag_cases_cb.isChecked(),
+            "letter_type": self.flag_letter_cb.isChecked(),
+            "raiffeisen_rule": self.flag_raiff_cb.isChecked(),
+        }
+
+    def get_party_mode(self) -> str:
+        if self.party_plaintiff_rb.isChecked():
+            return "plaintiff"
+        if self.party_defendant_rb.isChecked():
+            return "defendant"
+        return "opposing"
+
+    def get_ai_backend(self) -> str:
+        idx = self.backend_combo.currentIndex()
+        if idx == 1:
+            return "ollama"
+        if idx == 2:
+            return "auto"
+        return "openai"
+
+    def build_options(self) -> NamingOptions:
+        return NamingOptions(
+            include_parties=self.include_parties_cb.isChecked(),
+            include_case_numbers=self.include_cases_cb.isChecked(),
+            include_letter_type=self.include_letter_cb.isChecked(),
+            party_mode=self.get_party_mode(),
+            ocr_enabled=self.run_ocr_checkbox.isChecked(),
+            ocr_char_limit=self.char_limit_spin.value(),
+            ocr_dpi=self.ocr_dpi_spin.value(),
+            prompt_template=self.prompt_edit.toPlainText(),
+        )
 
     # ------------------------------------------------------
     # Process One File
@@ -849,17 +1016,10 @@ class RenamerGUI(QWidget):
             if self.processing_enabled:
                 self.process_current_file()
 
-    def handle_party_toggle(self, _checked: bool):
-        # keep preference mutually exclusive
-        if self.sender() is self.use_plaintiff_cb and self.use_plaintiff_cb.isChecked():
-            self.use_defendant_cb.setChecked(False)
-        elif self.sender() is self.use_defendant_cb and self.use_defendant_cb.isChecked():
-            self.use_plaintiff_cb.setChecked(False)
-
     def pick_party_from_meta(self, meta: dict) -> list[str]:
-        if self.use_plaintiff_cb.isChecked():
+        if self.party_plaintiff_rb.isChecked():
             return meta.get("plaintiff", []) or ["Unknown"]
-        if self.use_defendant_cb.isChecked():
+        if self.party_defendant_rb.isChecked():
             return meta.get("defendant", []) or ["Unknown"]
         return choose_party(meta)
 
@@ -871,34 +1031,27 @@ class RenamerGUI(QWidget):
     def generate_result_for_index(self, index: int) -> dict:
         pdf = self.pdf_files[index]
         pdf_path = os.path.join(self.input_edit.text(), pdf)
-        ocr_text = extract_text_ocr(pdf_path, self.char_limit_spin.value()) if self.run_ocr_checkbox.isChecked() else ""
+        global AI_BACKEND
+        AI_BACKEND = self.get_ai_backend()
+        options = self.build_options()
+        set_prompt_context(options.prompt_template, self.get_prompt_flags())
+        ocr_text = extract_text_ocr(
+            pdf_path,
+            options.ocr_char_limit,
+            options.ocr_dpi,
+        ) if options.ocr_enabled else ""
 
-        raw = call_model(ocr_text) if ocr_text else "{}"
-        try:
-            meta = json.loads(raw)
-        except Exception:
-            meta = {
-                "plaintiff": [],
-                "defendant": [],
-                "case_numbers": [],
-                "letter_type": "Unknown",
-            }
+        meta = extract_metadata(ocr_text) if ocr_text else {
+            "plaintiff": [],
+            "defendant": [],
+            "case_numbers": [],
+            "letter_type": "unknown",
+        }
 
         if self.type_box.currentText():
             meta["letter_type"] = self.type_box.currentText()
 
-        party = self.pick_party_from_meta(meta)
-        cases = meta.get("case_numbers", [])
-        lt = meta.get("letter_type", "Unknown")
-
-        filename = build_filename(
-            party,
-            cases,
-            lt,
-            include_parties=self.include_parties_cb.isChecked(),
-            include_cases=self.include_cases_cb.isChecked(),
-            include_letter_type=self.include_letter_cb.isChecked(),
-        )
+        filename = build_filename(meta, options)
 
         return {
             "ocr_text": ocr_text,
@@ -940,17 +1093,16 @@ class RenamerGUI(QWidget):
         if index in self.active_workers or index in self.file_results:
             return
 
+        global AI_BACKEND
+        AI_BACKEND = self.get_ai_backend()
+        options = self.build_options()
+        flags = self.get_prompt_flags()
         worker = FileProcessWorker(
             index=index,
             pdf_path=pdf_path,
-            run_ocr=self.run_ocr_checkbox.isChecked(),
-            char_limit=self.char_limit_spin.value(),
-            include_parties=self.include_parties_cb.isChecked(),
-            include_cases=self.include_cases_cb.isChecked(),
-            include_letter_type=self.include_letter_cb.isChecked(),
+            options=options,
+            prompt_flags=flags,
             selected_letter_type=self.type_box.currentText(),
-            prefer_plaintiff=self.use_plaintiff_cb.isChecked(),
-            prefer_defendant=self.use_defendant_cb.isChecked(),
             stop_event=self.stop_event,
         )
         worker.finished.connect(self.handle_worker_finished)
