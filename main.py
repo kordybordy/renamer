@@ -22,7 +22,7 @@ import pytesseract
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
-    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem
+    QCheckBox, QSpinBox
 )
 from PyQt6.QtCore import Qt
 
@@ -316,20 +316,7 @@ def build_filename(
 ) -> str:
     segments = []
 
-    if include_plaintiff or include_defendant:
-        parties: list[str] = []
-
-        if include_plaintiff:
-            parties.extend(plaintiff_parties)
-        if include_defendant:
-            parties.extend(defendant_parties)
-
-        if not parties:
-            parties = choose_party({
-                "plaintiff": plaintiff_parties,
-                "defendant": defendant_parties,
-            })
-
+    if include_parties:
         normalized = normalize_parties(parties)
         segments.append(join_parties(normalized))
 
@@ -420,34 +407,29 @@ class RenamerGUI(QWidget):
         # Filename components
         h3c = QHBoxLayout()
         h3c.addWidget(QLabel("Include in filename:"))
-        self.include_plaintiff_cb = QCheckBox("Plaintiff")
-        self.include_plaintiff_cb.setChecked(True)
-        self.include_defendant_cb = QCheckBox("Defendant")
-        self.include_defendant_cb.setChecked(True)
+        self.include_parties_cb = QCheckBox("Parties")
+        self.include_parties_cb.setChecked(True)
         self.include_cases_cb = QCheckBox("Case numbers")
         self.include_cases_cb.setChecked(True)
         self.include_letter_cb = QCheckBox("Letter type")
         self.include_letter_cb.setChecked(True)
 
-        h3c.addWidget(self.include_plaintiff_cb)
-        h3c.addWidget(self.include_defendant_cb)
+        h3c.addWidget(self.include_parties_cb)
         h3c.addWidget(self.include_cases_cb)
         h3c.addWidget(self.include_letter_cb)
         layout.addLayout(h3c)
+
+        # OCR preview
+        layout.addWidget(QLabel("OCR Preview:"))
+        self.ocr_view = QTextEdit()
+        self.ocr_view.setReadOnly(True)
+        layout.addWidget(self.ocr_view)
 
         # AI metadata preview
         layout.addWidget(QLabel("Extracted metadata:"))
         self.meta_view = QTextEdit()
         self.meta_view.setReadOnly(True)
         layout.addWidget(self.meta_view)
-
-        # PDF list with proposals
-        layout.addWidget(QLabel("PDFs in folder:"))
-        self.pdf_table = QTableWidget(0, 2)
-        self.pdf_table.setHorizontalHeaderLabels(["PDF", "Proposed filename"])
-        self.pdf_table.horizontalHeader().setStretchLastSection(True)
-        self.pdf_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.pdf_table)
 
         # Filename editing
         h4 = QHBoxLayout()
@@ -526,12 +508,6 @@ class RenamerGUI(QWidget):
         self.pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
         self.current_index = 0
 
-        self.pdf_table.setRowCount(0)
-        for row, pdf in enumerate(self.pdf_files):
-            self.pdf_table.insertRow(row)
-            self.pdf_table.setItem(row, 0, QTableWidgetItem(pdf))
-            self.pdf_table.setItem(row, 1, QTableWidgetItem(""))
-
         if not self.pdf_files:
             QMessageBox.information(self, "Info", "No PDFs found in folder.")
             return
@@ -556,6 +532,7 @@ class RenamerGUI(QWidget):
         else:
             self.ocr_text = ""
 
+        self.ocr_view.setText(self.ocr_text or "[OCR skipped]")
         self.char_count_label.setText(f"Characters retrieved: {len(self.ocr_text)}")
 
         # AI extraction
@@ -577,27 +554,20 @@ class RenamerGUI(QWidget):
         if selected_type:
             self.meta["letter_type"] = selected_type
 
-        plaintiffs = self.meta.get("plaintiff", [])
-        defendants = self.meta.get("defendant", [])
+        party = choose_party(self.meta)
         cases = self.meta.get("case_numbers", [])
         lt = self.meta.get("letter_type", "Unknown")
 
         filename = build_filename(
-            plaintiffs,
-            defendants,
+            party,
             cases,
             lt,
-            include_plaintiff=self.include_plaintiff_cb.isChecked(),
-            include_defendant=self.include_defendant_cb.isChecked(),
+            include_parties=self.include_parties_cb.isChecked(),
             include_cases=self.include_cases_cb.isChecked(),
             include_letter_type=self.include_letter_cb.isChecked(),
         )
         self.filename_edit.setText(filename)
         filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-
-        # Update table preview
-        if 0 <= self.current_index < self.pdf_table.rowCount():
-            self.pdf_table.setItem(self.current_index, 1, QTableWidgetItem(filename))
 
     # ------------------------------------------------------
     # Button handlers
