@@ -22,9 +22,9 @@ import pytesseract
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
-    QCheckBox, QSpinBox
+    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from openai import OpenAI
 client = OpenAI(api_key=API_KEY)
@@ -337,6 +337,75 @@ def build_filename(
 # GUI
 # ==========================================================
 
+class FileProcessWorker(QThread):
+    finished = pyqtSignal(int, dict)
+    failed = pyqtSignal(int, Exception)
+
+    def __init__(
+        self,
+        index: int,
+        pdf_path: str,
+        run_ocr: bool,
+        char_limit: int,
+        include_parties: bool,
+        include_cases: bool,
+        include_letter_type: bool,
+        selected_letter_type: str,
+    ):
+        super().__init__()
+        self.index = index
+        self.pdf_path = pdf_path
+        self.run_ocr = run_ocr
+        self.char_limit = char_limit
+        self.include_parties = include_parties
+        self.include_cases = include_cases
+        self.include_letter_type = include_letter_type
+        self.selected_letter_type = selected_letter_type
+
+    def run(self):
+        try:
+            ocr_text = extract_text_ocr(self.pdf_path, self.char_limit) if self.run_ocr else ""
+
+            raw = call_model(ocr_text) if ocr_text else "{}"
+            try:
+                meta = json.loads(raw)
+            except Exception:
+                meta = {
+                    "plaintiff": [],
+                    "defendant": [],
+                    "case_numbers": [],
+                    "letter_type": "Unknown",
+                }
+
+            if self.selected_letter_type:
+                meta["letter_type"] = self.selected_letter_type
+
+            party = choose_party(meta)
+            cases = meta.get("case_numbers", [])
+            lt = meta.get("letter_type", "Unknown")
+
+            filename = build_filename(
+                party,
+                cases,
+                lt,
+                include_parties=self.include_parties,
+                include_cases=self.include_cases,
+                include_letter_type=self.include_letter_type,
+            )
+
+            self.finished.emit(
+                self.index,
+                {
+                    "ocr_text": ocr_text,
+                    "meta": meta,
+                    "filename": filename,
+                    "char_count": len(ocr_text),
+                },
+            )
+        except Exception as e:
+            log_exception(e)
+            self.failed.emit(self.index, e)
+
 class RenamerGUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -348,6 +417,8 @@ class RenamerGUI(QWidget):
         self.current_index = 0
         self.ocr_text = ""
         self.meta = {}
+        self.file_results: dict[int, dict] = {}
+        self.worker: FileProcessWorker | None = None
 
         # ---------- Layout ----------
         layout = QVBoxLayout()
@@ -418,11 +489,23 @@ class RenamerGUI(QWidget):
         h3c.addWidget(self.include_cases_cb)
         h3c.addWidget(self.include_letter_cb)
         layout.addLayout(h3c)
+        
+        layout.addWidget(QLabel("Files and proposed names:"))
+        self.file_table = QTableWidget(0, 2)
+        self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
+        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.file_table.verticalHeader().setVisible(False)
+        self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
+        self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
+        self.file_table.cellClicked.connect(self.on_row_selected)
+        layout.addWidget(self.file_table)
 
         # OCR preview
         layout.addWidget(QLabel("OCR Preview:"))
         self.ocr_view = QTextEdit()
         self.ocr_view.setReadOnly(True)
+        self.ocr_view.setVisible(False)
         layout.addWidget(self.ocr_view)
 
         # AI metadata preview
@@ -442,12 +525,15 @@ class RenamerGUI(QWidget):
         h5 = QHBoxLayout()
         btn_next = QPushButton("Next File")
         btn_next.clicked.connect(self.next_file)
+        self.btn_next = btn_next
 
         btn_process = QPushButton("Process This File")
         btn_process.clicked.connect(self.process_this_file)
+        self.btn_process = btn_process
 
         btn_all = QPushButton("Process All")
         btn_all.clicked.connect(self.process_all_files_safe)
+        self.btn_all = btn_all
 
         btn_quit = QPushButton("Quit")
         btn_quit.clicked.connect(self.close)
@@ -507,11 +593,19 @@ class RenamerGUI(QWidget):
 
         self.pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
         self.current_index = 0
+        self.file_results.clear()
+
+        self.file_table.setRowCount(0)
+        for idx, filename in enumerate(self.pdf_files):
+            self.file_table.insertRow(idx)
+            self.file_table.setItem(idx, 0, QTableWidgetItem(filename))
+            self.file_table.setItem(idx, 1, QTableWidgetItem("Pending"))
 
         if not self.pdf_files:
             QMessageBox.information(self, "Info", "No PDFs found in folder.")
             return
-
+            
+        self.file_table.selectRow(0)
         self.process_current_file()
 
     # ------------------------------------------------------
@@ -522,59 +616,39 @@ class RenamerGUI(QWidget):
         if not self.pdf_files:
             return
 
+        if self.worker and self.worker.isRunning():
+            return
+
+
         folder = self.input_edit.text()
         pdf = self.pdf_files[self.current_index]
         pdf_path = os.path.join(folder, pdf)
 
-        # OCR
-        if self.run_ocr_checkbox.isChecked():
-            self.ocr_text = extract_text_ocr(pdf_path, self.char_limit_spin.value())
-        else:
-            self.ocr_text = ""
+        self.set_processing_enabled(False)
 
-        self.ocr_view.setText(self.ocr_text or "[OCR skipped]")
-        self.char_count_label.setText(f"Characters retrieved: {len(self.ocr_text)}")
 
-        # AI extraction
-        raw = call_model(self.ocr_text) if self.ocr_text else "{}"
-        try:
-            self.meta = json.loads(raw)
-        except Exception:
-            self.meta = {
-                "plaintiff": [],
-                "defendant": [],
-                "case_numbers": [],
-                "letter_type": "Unknown"
-            }
-
-        self.meta_view.setText(json.dumps(self.meta, indent=2, ensure_ascii=False))
-
-        # Override letter type from dropdown selection
-        selected_type = self.type_box.currentText()
-        if selected_type:
-            self.meta["letter_type"] = selected_type
-
-        party = choose_party(self.meta)
-        cases = self.meta.get("case_numbers", [])
-        lt = self.meta.get("letter_type", "Unknown")
-
-        filename = build_filename(
-            party,
-            cases,
-            lt,
+        self.worker = FileProcessWorker(
+            index=self.current_index,
+            pdf_path=pdf_path,
+            run_ocr=self.run_ocr_checkbox.isChecked(),
+            char_limit=self.char_limit_spin.value(),
             include_parties=self.include_parties_cb.isChecked(),
             include_cases=self.include_cases_cb.isChecked(),
             include_letter_type=self.include_letter_cb.isChecked(),
+            selected_letter_type=self.type_box.currentText(),
         )
-        self.filename_edit.setText(filename)
-        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        self.worker.finished.connect(self.handle_worker_finished)
+        self.worker.failed.connect(self.handle_worker_failed)
+        self.worker.start()
+        )
+
 
     # ------------------------------------------------------
     # Button handlers
     # ------------------------------------------------------
 
     def next_file(self):
-        if not self.pdf_files:
+        if not self.pdf_files or (self.worker and self.worker.isRunning()):
             return
         self.current_index = (self.current_index + 1) % len(self.pdf_files)
         self.process_current_file()
@@ -585,7 +659,8 @@ class RenamerGUI(QWidget):
             QMessageBox.warning(self, "Error", "Output folder does not exist.")
             return
 
-        if not self.pdf_files:
+        
+        if not self.pdf_files or (self.worker and self.worker.isRunning()):
             return
 
         pdf_name = self.pdf_files[self.current_index]
@@ -598,8 +673,11 @@ class RenamerGUI(QWidget):
     def process_all_files_safe(self):
         for idx, pdf_path in enumerate(self.pdf_files):
             try:
-                self.current_index = idx
-                self.process_current_file()
+                result = self.file_results.get(idx)
+                if result is None:
+                    result = self.generate_result_for_index(idx)
+                    self.file_results[idx] = result
+                self.apply_cached_result(idx, result)
             except Exception as e:
                 log_exception(e)
                 QMessageBox.warning(
@@ -619,14 +697,61 @@ class RenamerGUI(QWidget):
             return
 
         for idx, pdf_name in enumerate(self.pdf_files[:]):  # iterate over COPY
-            self.current_index = idx
-            self.process_current_file()
+            result = self.file_results.get(idx)
+            if result is None:
+                result = self.generate_result_for_index(idx)
+                self.file_results[idx] = result
+            self.apply_cached_result(idx, result)
 
             inp = os.path.join(self.input_edit.text(), pdf_name)
             out = os.path.join(out_folder, self.filename_edit.text())
             shutil.move(inp, out)
 
         QMessageBox.information(self, "Done", "All files processed.")
+
+    # Helpers
+    def set_processing_enabled(self, enabled: bool):
+        self.btn_process.setEnabled(enabled)
+
+        self.worker = None
+        self.ocr_text = result.get("ocr_text", "")
+
+        self.char_count_label.setText(f"Characters retrieved: {result.get('char_count', 0)}")
+
+            self.file_table.setItem(index, 1, QTableWidgetItem(result.get("filename", "")))
+
+
+        self.worker = None
+        QMessageBox.critical(self, "Error", f"Failed processing file at index {index}: {error}")
+    def on_row_selected(self, row: int, _col: int):
+        if row in self.file_results:
+            self.apply_cached_result(row, cached)
+            self.process_current_file()
+    def generate_result_for_index(self, index: int) -> dict:
+        pdf = self.pdf_files[index]
+
+        raw = call_model(ocr_text) if ocr_text else "{}"
+        try:
+        except Exception:
+                "plaintiff": [],
+                "case_numbers": [],
+            }
+        if self.type_box.currentText():
+
+        cases = meta.get("case_numbers", [])
+
+            party,
+            lt,
+            include_cases=self.include_cases_cb.isChecked(),
+        )
+        return {
+            "meta": meta,
+            "char_count": len(ocr_text),
+
+        self.meta = cached.get("meta", {})
+        self.meta_view.setText(json.dumps(self.meta, indent=2, ensure_ascii=False))
+        self.filename_edit.setText(cached.get("filename", ""))
+            self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
 
 # ==========================================================
 # MAIN
