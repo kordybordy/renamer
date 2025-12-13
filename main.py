@@ -305,12 +305,10 @@ def sanitize_filename_human(name: str) -> str:
     return re.sub(r'[<>:"\\|?*]', "", name)
 
 def build_filename(
-    plaintiff_parties: list[str],
-    defendant_parties: list[str],
+    parties: list[str],
     cases: list[str],
     letter_type: str,
-    include_plaintiff: bool = True,
-    include_defendant: bool = True,
+    include_parties: bool = True,
     include_cases: bool = True,
     include_letter_type: bool = True,
 ) -> str:
@@ -613,19 +611,14 @@ class RenamerGUI(QWidget):
     # ------------------------------------------------------
 
     def process_current_file(self):
-        if not self.pdf_files:
+        if not self.pdf_files or (self.worker and self.worker.isRunning()):
             return
-
-        if self.worker and self.worker.isRunning():
-            return
-
 
         folder = self.input_edit.text()
         pdf = self.pdf_files[self.current_index]
         pdf_path = os.path.join(folder, pdf)
 
         self.set_processing_enabled(False)
-
 
         self.worker = FileProcessWorker(
             index=self.current_index,
@@ -640,8 +633,6 @@ class RenamerGUI(QWidget):
         self.worker.finished.connect(self.handle_worker_finished)
         self.worker.failed.connect(self.handle_worker_failed)
         self.worker.start()
-        )
-
 
     # ------------------------------------------------------
     # Button handlers
@@ -659,7 +650,6 @@ class RenamerGUI(QWidget):
             QMessageBox.warning(self, "Error", "Output folder does not exist.")
             return
 
-        
         if not self.pdf_files or (self.worker and self.worker.isRunning()):
             return
 
@@ -712,46 +702,84 @@ class RenamerGUI(QWidget):
     # Helpers
     def set_processing_enabled(self, enabled: bool):
         self.btn_process.setEnabled(enabled)
+        self.btn_all.setEnabled(enabled)
+        self.btn_next.setEnabled(enabled)
+        self.run_ocr_checkbox.setEnabled(enabled)
+        self.char_limit_spin.setEnabled(enabled)
+        self.include_parties_cb.setEnabled(enabled)
+        self.include_cases_cb.setEnabled(enabled)
+        self.include_letter_cb.setEnabled(enabled)
+        self.type_box.setEnabled(enabled)
 
+    def handle_worker_finished(self, index: int, result: dict):
         self.worker = None
-        self.ocr_text = result.get("ocr_text", "")
+        self.file_results[index] = result
+        self.apply_cached_result(index, result)
+        self.set_processing_enabled(True)
 
-        self.char_count_label.setText(f"Characters retrieved: {result.get('char_count', 0)}")
-
-            self.file_table.setItem(index, 1, QTableWidgetItem(result.get("filename", "")))
-
-
+    def handle_worker_failed(self, index: int, error: Exception):
         self.worker = None
+        self.set_processing_enabled(True)
         QMessageBox.critical(self, "Error", f"Failed processing file at index {index}: {error}")
+
     def on_row_selected(self, row: int, _col: int):
         if row in self.file_results:
-            self.apply_cached_result(row, cached)
+            self.apply_cached_result(row, self.file_results[row])
+        else:
+            self.current_index = row
             self.process_current_file()
+
     def generate_result_for_index(self, index: int) -> dict:
         pdf = self.pdf_files[index]
+        pdf_path = os.path.join(self.input_edit.text(), pdf)
+        ocr_text = extract_text_ocr(pdf_path, self.char_limit_spin.value()) if self.run_ocr_checkbox.isChecked() else ""
 
         raw = call_model(ocr_text) if ocr_text else "{}"
         try:
+            meta = json.loads(raw)
         except Exception:
+            meta = {
                 "plaintiff": [],
+                "defendant": [],
                 "case_numbers": [],
+                "letter_type": "Unknown",
             }
+
         if self.type_box.currentText():
+            meta["letter_type"] = self.type_box.currentText()
 
+        party = choose_party(meta)
         cases = meta.get("case_numbers", [])
+        lt = meta.get("letter_type", "Unknown")
 
+        filename = build_filename(
             party,
+            cases,
             lt,
+            include_parties=self.include_parties_cb.isChecked(),
             include_cases=self.include_cases_cb.isChecked(),
+            include_letter_type=self.include_letter_cb.isChecked(),
         )
-        return {
-            "meta": meta,
-            "char_count": len(ocr_text),
 
+        return {
+            "ocr_text": ocr_text,
+            "meta": meta,
+            "filename": filename,
+            "char_count": len(ocr_text),
+        }
+
+    def apply_cached_result(self, index: int, cached: dict):
+        self.current_index = index
+        self.ocr_text = cached.get("ocr_text", "")
         self.meta = cached.get("meta", {})
+
+        self.ocr_view.setText(self.ocr_text)
+        self.ocr_view.setVisible(bool(self.ocr_text))
         self.meta_view.setText(json.dumps(self.meta, indent=2, ensure_ascii=False))
         self.filename_edit.setText(cached.get("filename", ""))
-            self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
+        self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
+
+        self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
 
 # ==========================================================
 # MAIN
