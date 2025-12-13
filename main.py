@@ -50,17 +50,6 @@ FILENAME_RULES = {
 }
 
 
-@dataclass
-class NamingOptions:
-    include_parties: bool = True
-    include_case_numbers: bool = True
-    include_letter_type: bool = True
-    party_mode: str = "opposing"  # opposing | plaintiff | defendant
-    ocr_enabled: bool = True
-    ocr_char_limit: int = 1500
-    ocr_dpi: int = 300
-    prompt_template: str = DEFAULT_PROMPT
-
 # ===============================
 # Logging
 # ===============================
@@ -163,6 +152,18 @@ PROMPT_CONTEXT = {
     "template": DEFAULT_PROMPT,
     "flags": PROMPT_FLAGS_DEFAULT.copy(),
 }
+
+
+@dataclass
+class NamingOptions:
+    include_parties: bool = True
+    include_case_numbers: bool = True
+    include_letter_type: bool = True
+    party_mode: str = "opposing"  # opposing | plaintiff | defendant
+    ocr_enabled: bool = True
+    ocr_char_limit: int = 1500
+    ocr_dpi: int = 300
+    prompt_template: str = DEFAULT_PROMPT
 
 
 def set_prompt_context(template: str, flags: dict):
