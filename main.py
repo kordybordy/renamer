@@ -365,11 +365,11 @@ def extract_metadata_ollama(text: str, prompt: str) -> dict:
         "stream": False,
     }
     try:
-        resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+        resp = requests.post("http://127.0.0.1:11434/api/chat", json=payload, timeout=60)
         resp.raise_for_status()
     except requests.RequestException as e:
         raise RuntimeError(
-            "Unable to reach Ollama at http://localhost:11434. Start the Ollama server or switch AI backend."
+            "Unable to reach Ollama at http://127.0.0.1:11434. Start the Ollama server or switch AI backend."
         ) from e
 
     data = resp.json()
