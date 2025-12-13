@@ -413,6 +413,7 @@ class RenamerGUI(QWidget):
         # State
         self.pdf_files = []
         self.current_index = 0
+        self.pending_index: int | None = None
         self.ocr_text = ""
         self.meta = {}
         self.file_results: dict[int, dict] = {}
@@ -591,6 +592,7 @@ class RenamerGUI(QWidget):
 
         self.pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
         self.current_index = 0
+        self.pending_index = None
         self.file_results.clear()
 
         self.file_table.setRowCount(0)
@@ -611,7 +613,12 @@ class RenamerGUI(QWidget):
     # ------------------------------------------------------
 
     def process_current_file(self):
-        if not self.pdf_files or (self.worker and self.worker.isRunning()):
+        if not self.pdf_files:
+            return
+
+        if self.worker and self.worker.isRunning():
+            # queue the desired index so the UI stays responsive
+            self.pending_index = self.current_index
             return
 
         folder = self.input_edit.text()
@@ -639,9 +646,16 @@ class RenamerGUI(QWidget):
     # ------------------------------------------------------
 
     def next_file(self):
-        if not self.pdf_files or (self.worker and self.worker.isRunning()):
+        if not self.pdf_files:
             return
-        self.current_index = (self.current_index + 1) % len(self.pdf_files)
+
+        next_index = (self.current_index + 1) % len(self.pdf_files)
+        if self.worker and self.worker.isRunning():
+            # remember desired navigation without blocking UI
+            self.pending_index = next_index
+            return
+
+        self.current_index = next_index
         self.process_current_file()
 
     def process_this_file(self):
@@ -701,15 +715,9 @@ class RenamerGUI(QWidget):
 
     # Helpers
     def set_processing_enabled(self, enabled: bool):
+        # Keep navigation responsive; only disable actions that must wait
         self.btn_process.setEnabled(enabled)
         self.btn_all.setEnabled(enabled)
-        self.btn_next.setEnabled(enabled)
-        self.run_ocr_checkbox.setEnabled(enabled)
-        self.char_limit_spin.setEnabled(enabled)
-        self.include_parties_cb.setEnabled(enabled)
-        self.include_cases_cb.setEnabled(enabled)
-        self.include_letter_cb.setEnabled(enabled)
-        self.type_box.setEnabled(enabled)
 
     def handle_worker_finished(self, index: int, result: dict):
         self.worker = None
@@ -717,10 +725,20 @@ class RenamerGUI(QWidget):
         self.apply_cached_result(index, result)
         self.set_processing_enabled(True)
 
+        if self.pending_index is not None:
+            self.current_index = self.pending_index
+            self.pending_index = None
+            self.process_current_file()
+
     def handle_worker_failed(self, index: int, error: Exception):
         self.worker = None
         self.set_processing_enabled(True)
         QMessageBox.critical(self, "Error", f"Failed processing file at index {index}: {error}")
+
+        if self.pending_index is not None:
+            self.current_index = self.pending_index
+            self.pending_index = None
+            self.process_current_file()
 
     def on_row_selected(self, row: int, _col: int):
         if row in self.file_results:
