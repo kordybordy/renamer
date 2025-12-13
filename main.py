@@ -500,7 +500,7 @@ class RenamerGUI(QWidget):
         # Filename components
         h3c = QHBoxLayout()
         h3c.addWidget(QLabel("Include in filename:"))
-        self.include_parties_cb = QCheckBox("Parties")
+        self.include_parties_cb = QCheckBox("Plaintiff/Defendant")
         self.include_parties_cb.setChecked(True)
         self.include_cases_cb = QCheckBox("Case numbers")
         self.include_cases_cb.setChecked(True)
@@ -536,6 +536,7 @@ class RenamerGUI(QWidget):
         h4 = QHBoxLayout()
         h4.addWidget(QLabel("Proposed filename:"))
         self.filename_edit = QLineEdit()
+        self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         h4.addWidget(self.filename_edit)
         layout.addLayout(h4)
 
@@ -716,30 +717,64 @@ class RenamerGUI(QWidget):
 
         self.stop_event.clear()
 
+        self.update_filename_for_current_row()
+
         pdf_name = self.pdf_files[self.current_index]
         inp = os.path.join(self.input_edit.text(), pdf_name)
-        out = os.path.join(out_folder, self.filename_edit.text())
 
-        shutil.move(inp, out)
-        QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+        proposed = self.file_table.item(self.current_index, 1)
+        target_name = proposed.text() if proposed else self.filename_edit.text()
+        if not target_name:
+            QMessageBox.warning(self, "Error", "Proposed filename is empty.")
+            return
+
+        out = os.path.join(out_folder, target_name)
+
+        try:
+            shutil.move(inp, out)
+            if self.current_index in self.file_results:
+                self.file_results[self.current_index]["filename"] = target_name
+            QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+        except Exception as e:
+            log_exception(e)
+            QMessageBox.critical(self, "Error", f"Failed to rename file:\n{e}")
 
     def process_all_files_safe(self):
+        out_folder = self.output_edit.text()
+        if not os.path.isdir(out_folder):
+            QMessageBox.warning(self, "Error", "Output folder does not exist.")
+            return
+
+        if not self.pdf_files:
+            return
+
         self.stop_event.clear()
-        for idx, pdf_path in enumerate(self.pdf_files):
+        for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
                 if result is None:
                     result = self.generate_result_for_index(idx)
                     self.file_results[idx] = result
-                self.apply_cached_result(idx, result)
+
+                self.current_index = idx
+                self.apply_cached_result(idx, self.file_results[idx])
+                proposed_item = self.file_table.item(idx, 1)
+                target_name = proposed_item.text() if proposed_item else result.get("filename", pdf_name)
+                self.file_results[idx]["filename"] = target_name
+
+                inp_path = os.path.join(self.input_edit.text(), pdf_name)
+                out_path = os.path.join(out_folder, target_name)
+                shutil.move(inp_path, out_path)
             except Exception as e:
                 log_exception(e)
                 QMessageBox.warning(
                     self,
                     "File error",
-                    f"Error processing:\n{pdf_path}\n\nContinuing with next file."
+                    f"Error processing:\n{pdf_name}\n\nContinuing with next file."
                 )
                 continue
+
+        QMessageBox.information(self, "Done", "All files processed.")
 
     def process_all(self):
         out_folder = self.output_edit.text()
@@ -780,11 +815,13 @@ class RenamerGUI(QWidget):
         self.start_parallel_processing()
 
     def on_row_selected(self, row: int, _col: int):
+        self.current_index = row
+
         if row in self.file_results:
             self.apply_cached_result(row, self.file_results[row])
         else:
-            self.current_index = row
-            current_name = self.file_table.item(row, 1).text()
+            item = self.file_table.item(row, 1)
+            current_name = item.text() if item else ""
             self.filename_edit.setText(current_name)
             if not self.processing_enabled:
                 self.ocr_text = ""
@@ -834,7 +871,6 @@ class RenamerGUI(QWidget):
             meta["letter_type"] = self.type_box.currentText()
 
         party = self.pick_party_from_meta(meta)
-        party = choose_party(meta)
         cases = meta.get("case_numbers", [])
         lt = meta.get("letter_type", "Unknown")
 
@@ -866,6 +902,18 @@ class RenamerGUI(QWidget):
             self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
 
         self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
+
+    def update_filename_for_current_row(self):
+        if not self.pdf_files:
+            return
+        if self.current_index >= self.file_table.rowCount():
+            return
+
+        current_text = self.filename_edit.text()
+        self.file_table.setItem(self.current_index, 1, QTableWidgetItem(current_text))
+
+        if self.current_index in self.file_results:
+            self.file_results[self.current_index]["filename"] = current_text
 
     # Background processing
     def start_worker_for_index(self, index: int, pdf_path: str):
