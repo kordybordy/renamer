@@ -1,0 +1,574 @@
+# ==========================================================
+# PyQt6 GUI PDF Renamer — OCR + AI (GPT-5-nano / GPT-4.1-mini)
+# Human-format filenames (comma-separated parties, Polish letters preserved)
+# ==========================================================
+
+# --------- HARD-CODED API KEY (EDIT THIS LINE!) ----------
+API_KEY = "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"
+# ----------------------------------------------------------
+
+import sys
+import os
+import re
+import json
+import shutil
+import subprocess
+import tempfile
+import glob
+
+from PIL import Image
+import pytesseract
+
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
+    QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox
+)
+from PyQt5.QtCore import Qt
+
+from openai import OpenAI
+client = OpenAI(api_key=API_KEY)
+
+# ===============================
+# FILENAME POLICY
+# ===============================
+
+FILENAME_RULES = {
+    "remove_raiffeisen": True,        # always remove Raiffeisen from parties
+    "max_parties": 3,                 # limit number of names in filename
+    "surname_first": True,            # SURNAME Name
+    "use_commas": True,               # comma-separated parties
+    "replace_slash_only": True,       # only replace "/" → "_"
+    "force_letter_type": True,        # GUI overrides AI letter type
+    "default_letter_type": "pozew",   # fallback if AI unsure
+}
+
+# ===============================
+# Logging
+# ===============================
+import traceback
+from datetime import datetime
+
+LOG_FILE = os.path.join(os.path.expanduser("~"), "ai_pdf_renamer_error.log")
+
+def log_exception(e: Exception):
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write("\n" + "=" * 60 + "\n")
+        f.write(datetime.now().isoformat() + "\n")
+        f.write(str(e) + "\n")
+        f.write(traceback.format_exc())
+        f.flush()
+        os.fsync(f.fileno())
+
+# ===============================
+# BASE DIR
+# ===============================
+if getattr(sys, "frozen", False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ===============================
+# POPPLER (GLOBAL!)
+# ===============================
+POPPLER_PATH = os.path.join(BASE_DIR, "poppler", "Library", "bin")
+PDFTOPPM_EXE = os.path.join(POPPLER_PATH, "pdftoppm.exe")
+os.environ["PATH"] = POPPLER_PATH + os.pathsep + os.environ.get("PATH", "")
+
+if not os.path.exists(PDFTOPPM_EXE):
+    raise RuntimeError(f"pdftoppm.exe not found: {PDFTOPPM_EXE}")
+
+# ===============================
+# Tesseract configuration (CRITICAL)
+# ===============================
+
+def configure_tesseract() -> str:
+    import sys, os, pytesseract
+
+    if getattr(sys, "frozen", False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    tesseract_dir = os.path.join(base_path, "tesseract")
+    tessdata_dir  = os.path.join(tesseract_dir, "tessdata")
+
+    tesseract_exe = os.path.join(tesseract_dir, "tesseract.exe")
+
+    if not os.path.exists(tesseract_exe):
+        raise RuntimeError(f"Tesseract EXE not found: {tesseract_exe}")
+
+    if not os.path.exists(tessdata_dir):
+        raise RuntimeError(f"Tessdata folder not found: {tessdata_dir}")
+
+    pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+    os.environ["TESSDATA_PREFIX"] = tessdata_dir
+
+    return tessdata_dir
+
+# Call ONCE
+TESSDATA_DIR = configure_tesseract()
+
+print("[DEBUG] Using tessdata:", TESSDATA_DIR)
+
+# ==========================================================
+# AI SYSTEM PROMPT — returns structured JSON
+# ==========================================================
+
+SYSTEM_PROMPT = """
+Return strict JSON in this exact shape:
+
+{
+  "plaintiff": ["Name Surname", ...],
+  "defendant": ["Name Surname", ...],
+  "case_numbers": ["I C 1234/25", ...],
+  "letter_type": "Pozew" | "Kontrpozew" | "Pozew + Postanowienie" |
+                  "Postanowienie" | "Portal" | "Korespondencja" |
+                  "Unknown"
+}
+
+Rules:
+- Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
+- Extract ALL case numbers.
+- Preserve Polish letters.
+- Infer letter type according to content.
+- No commentary. Output JSON only.
+"""
+
+# ==========================================================
+# Helpers
+# ==========================================================
+
+def sanitize_case_number(case: str) -> str:
+    """Replace only '/' with '_' in case numbers."""
+    return case.replace("/", "_")
+
+def extract_text_ocr(pdf_path: str) -> str:
+    pdf_path = os.path.normpath(pdf_path)  # <<< CRITICAL FIX
+    """
+    OCR first page at 300 DPI using pdftoppm + Tesseract.
+    No pdf2image dependency.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="ocr_")
+    try:
+        out_prefix = os.path.join(tmp_dir, "page")
+
+        # --- render first page to PNG (300 DPI) ---
+        cmd = [
+            PDFTOPPM_EXE,
+            "-f", "1",
+            "-l", "1",
+            "-r", "300",
+            "-png",
+            pdf_path,
+            out_prefix
+        ]
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        # Find generated PNG (usually page-1.png)
+        pngs = glob.glob(os.path.join(tmp_dir, "page-*.png"))
+        if not pngs:
+            return ""
+
+        img_path = pngs[0]
+
+        # --- OCR ---
+        img = Image.open(img_path)
+
+        text = pytesseract.image_to_string(
+            img,                              # ← FIXED (was undefined "image")
+            lang="pol+eng",
+        )
+
+        return text[:1500]
+
+    except Exception as e:
+        log_exception(e)
+        return ""
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def call_model(text: str) -> str:
+    """Try GPT-5-nano → fallback GPT-4.1-mini."""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ]
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        pass
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text}
+        ]
+    )
+    return resp.choices[0].message.content
+
+def choose_party(meta: dict):
+    """Return opposing party if Raiffeisen is involved; otherwise plaintiff or defendant."""
+    blacklist = ["raiffeisen", "raiffeisen bank", "raiffeisen bank international"]
+
+    pl = meta.get("plaintiff", []) or []
+    df = meta.get("defendant", []) or []
+
+    def has_raiff(lst):
+        return any(any(b in n.lower() for b in blacklist) for n in lst)
+
+    if has_raiff(pl):
+        return df if df else ["Unknown"]
+    if has_raiff(df):
+        return pl if pl else ["Unknown"]
+    if pl:
+        return pl
+    if df:
+        return df
+    return ["Unknown"]
+
+def normalize_parties(parties: list[str]) -> list[str]:
+    out = []
+
+    for name in parties:
+        parts = name.strip().split()
+        if len(parts) >= 2 and FILENAME_RULES["surname_first"]:
+            surname = parts[-1]
+            given = " ".join(parts[:-1])
+            fixed = f"{surname} {given}"
+        else:
+            fixed = name.strip()
+
+        out.append(fixed)
+
+    # limit number of parties
+    if FILENAME_RULES["max_parties"]:
+        out = out[:FILENAME_RULES["max_parties"]]
+
+    return out
+
+def normalize_parties(parties: list[str]) -> list[str]:
+    """Surname first, preserve spaces, Polish letters."""
+    out = []
+    for p in parties:
+        parts = p.strip().split()
+        if len(parts) >= 2:
+            surname = parts[-1]
+            given = " ".join(parts[:-1])
+            out.append(f"{surname} {given}")
+        else:
+            out.append(p.strip())
+    return out
+
+def join_parties(parties: list[str]) -> str:
+    """
+    Join parties in EXACT human format:
+    - comma-separated
+    - spaces preserved
+    """
+    return ", ".join(parties) if parties else "UNKNOWN"
+
+def format_case_numbers(cases: list[str]) -> str:
+    """
+    First case normally, others in parentheses.
+    """
+    if not cases:
+        return "UNKNOWN"
+
+    if len(cases) == 1:
+        return cases[0]
+
+    first = cases[0]
+    rest = ", ".join(cases[1:])
+    return f"{first} ({rest})"
+
+
+def sanitize_filename_human(name: str) -> str:
+    """
+    Human rules:
+    - keep spaces
+    - replace ONLY forbidden Windows chars
+    - replace '/' with '_'
+    """
+    name = name.replace("/", "_")
+    return re.sub(r'[<>:"\\|?*]', "", name)
+
+def build_filename(parties: list[str], cases: list[str], letter_type: str) -> str:
+    parties = normalize_parties(parties)
+    party_part = join_parties(parties)
+    case_part = format_case_numbers(cases)
+
+    lt = (letter_type or "unknown").strip()
+
+    filename = f"{party_part} - {case_part} - {lt}.pdf"
+    return sanitize_filename_human(filename)
+
+# ==========================================================
+# GUI
+# ==========================================================
+
+class RenamerGUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("AI PDF Renamer")
+        self.setGeometry(200, 200, 900, 700)
+
+        # State
+        self.pdf_files = []
+        self.current_index = 0
+        self.ocr_text = ""
+        self.meta = {}
+
+        # ---------- Layout ----------
+        layout = QVBoxLayout()
+
+        # Input folder
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("Input folder:"))
+        self.input_edit = QLineEdit()
+        h1.addWidget(self.input_edit)
+        btn_input = QPushButton("Browse")
+        btn_input.clicked.connect(self.choose_input)
+        h1.addWidget(btn_input)
+        layout.addLayout(h1)
+
+        # Output folder
+        h2 = QHBoxLayout()
+        h2.addWidget(QLabel("Output folder:"))
+        self.output_edit = QLineEdit()
+        h2.addWidget(self.output_edit)
+        btn_output = QPushButton("Browse")
+        btn_output.clicked.connect(self.choose_output)
+        h2.addWidget(btn_output)
+        layout.addLayout(h2)
+
+        # Type selector
+        h3 = QHBoxLayout()
+        h3.addWidget(QLabel("PDF type:"))
+        self.type_box = QComboBox()
+        self.type_box.addItems([
+            "Pozew",
+            "Kontrpozew",
+            "Pozew + Postanowienie",
+            "Postanowienie",
+            "Portal",
+            "Korespondencja"
+        ])
+        h3.addWidget(self.type_box)
+        layout.addLayout(h3)
+
+        # OCR preview
+        layout.addWidget(QLabel("OCR Preview:"))
+        self.ocr_view = QTextEdit()
+        self.ocr_view.setReadOnly(True)
+        layout.addWidget(self.ocr_view)
+
+        # AI metadata preview
+        layout.addWidget(QLabel("Extracted metadata:"))
+        self.meta_view = QTextEdit()
+        self.meta_view.setReadOnly(True)
+        layout.addWidget(self.meta_view)
+
+        # Filename editing
+        h4 = QHBoxLayout()
+        h4.addWidget(QLabel("Proposed filename:"))
+        self.filename_edit = QLineEdit()
+        h4.addWidget(self.filename_edit)
+        layout.addLayout(h4)
+
+        # Buttons row
+        h5 = QHBoxLayout()
+        btn_next = QPushButton("Next File")
+        btn_next.clicked.connect(self.next_file)
+
+        btn_process = QPushButton("Process This File")
+        btn_process.clicked.connect(self.process_this_file)
+
+        btn_all = QPushButton("Process All")
+        btn_all.clicked.connect(self.process_all_files_safe)
+
+        btn_quit = QPushButton("Quit")
+        btn_quit.clicked.connect(self.close)
+
+        h5.addWidget(btn_next)
+        h5.addWidget(btn_process)
+        h5.addWidget(btn_all)
+        h5.addWidget(btn_quit)
+        layout.addLayout(h5)
+
+        self.setLayout(layout)
+
+    # ------------------------------------------------------
+    # Folder Selection
+    # ------------------------------------------------------
+
+    def choose_input(self):
+        try:
+            folder = QFileDialog.getExistingDirectory(self, "Select PDF Folder")
+            if not folder:
+                return
+            self.input_edit.setText(folder)
+            self.load_pdfs()
+        except Exception as e:
+            log_exception(e)
+            QMessageBox.critical(
+                self,
+                "Unhandled error",
+                f"An error occurred while selecting input folder.\n\n"
+                f"Details were written to:\n{LOG_FILE}"
+            )
+
+    def choose_output(self):
+        try:
+            folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+            if not folder:
+                return
+            self.output_edit.setText(folder)
+        except Exception as e:
+            log_exception(e)
+            QMessageBox.critical(
+                self,
+                "Unhandled error",
+                f"An error occurred while selecting output folder.\n\n"
+                f"Details were written to:\n{LOG_FILE}"
+            )
+
+    # ------------------------------------------------------
+    # Load PDFs
+    # ------------------------------------------------------
+
+    def load_pdfs(self):
+        folder = self.input_edit.text()
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, "Error", "Input folder does not exist.")
+            return
+
+        self.pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
+        self.current_index = 0
+
+        if not self.pdf_files:
+            QMessageBox.information(self, "Info", "No PDFs found in folder.")
+            return
+
+        self.process_current_file()
+
+    # ------------------------------------------------------
+    # Process One File
+    # ------------------------------------------------------
+
+    def process_current_file(self):
+        if not self.pdf_files:
+            return
+
+        folder = self.input_edit.text()
+        pdf = self.pdf_files[self.current_index]
+        pdf_path = os.path.join(folder, pdf)
+
+        # OCR
+        self.ocr_text = extract_text_ocr(pdf_path)
+        self.ocr_view.setText(self.ocr_text)
+
+        # AI extraction
+        raw = call_model(self.ocr_text)
+        try:
+            self.meta = json.loads(raw)
+        except Exception:
+            self.meta = {
+                "plaintiff": [],
+                "defendant": [],
+                "case_numbers": [],
+                "letter_type": "Unknown"
+            }
+
+        self.meta_view.setText(json.dumps(self.meta, indent=2, ensure_ascii=False))
+
+        # Override letter type from dropdown selection
+        selected_type = self.type_box.currentText()
+        if selected_type:
+            self.meta["letter_type"] = selected_type
+
+        party = choose_party(self.meta)
+        cases = self.meta.get("case_numbers", [])
+        lt = self.meta.get("letter_type", "Unknown")
+
+        filename = build_filename(party, cases, lt)
+        self.filename_edit.setText(filename)
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+    # ------------------------------------------------------
+    # Button handlers
+    # ------------------------------------------------------
+
+    def next_file(self):
+        if not self.pdf_files:
+            return
+        self.current_index = (self.current_index + 1) % len(self.pdf_files)
+        self.process_current_file()
+
+    def process_this_file(self):
+        out_folder = self.output_edit.text()
+        if not os.path.isdir(out_folder):
+            QMessageBox.warning(self, "Error", "Output folder does not exist.")
+            return
+
+        if not self.pdf_files:
+            return
+
+        pdf_name = self.pdf_files[self.current_index]
+        inp = os.path.join(self.input_edit.text(), pdf_name)
+        out = os.path.join(out_folder, self.filename_edit.text())
+
+        shutil.move(inp, out)
+        QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+
+    def process_all_files(self):
+        for idx, pdf_path in enumerate(self.pdf_files):
+            try:
+                self.process_current_file(pdf_path)
+            except Exception as e:
+                log_exception(e)
+                QMessageBox.warning(
+                    self,
+                    "File error",
+                    f"Error processing:\n{pdf_path}\n\nContinuing with next file."
+                )
+                continue
+
+    def process_all(self):
+        out_folder = self.output_edit.text()
+        if not os.path.isdir(out_folder):
+            QMessageBox.warning(self, "Error", "Output folder does not exist.")
+            return
+
+        if not self.pdf_files:
+            return
+
+        for pdf_name in self.pdf_files[:]:  # iterate over COPY
+            self.current_index = i
+            self.process_current_file()
+
+            inp = os.path.join(self.input_edit.text(), pdf_name)
+            out = os.path.join(out_folder, self.filename_edit.text())
+            shutil.move(inp, out)
+
+        QMessageBox.information(self, "Done", "All files processed.")
+
+# ==========================================================
+# MAIN
+# ==========================================================
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    gui = RenamerGUI()
+    gui.show()
+    sys.exit(app.exec())
