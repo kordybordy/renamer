@@ -539,6 +539,15 @@ class RenamerGUI(QWidget):
         h4.addWidget(self.filename_edit)
         layout.addLayout(h4)
 
+        play_row = QHBoxLayout()
+        self.play_button = QPushButton("▶ Play (Generate Proposals)")
+        self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
+        self.play_button.clicked.connect(self.start_processing_clicked)
+        play_row.addStretch()
+        play_row.addWidget(self.play_button)
+        play_row.addStretch()
+        layout.addLayout(play_row)
+
         # Buttons row
         h5 = QHBoxLayout()
         btn_next = QPushButton("Next File")
@@ -568,6 +577,8 @@ class RenamerGUI(QWidget):
         layout.addLayout(h5)
 
         self.setLayout(layout)
+
+        self.processing_enabled = False
 
     # ------------------------------------------------------
     # Folder Selection
@@ -620,25 +631,26 @@ class RenamerGUI(QWidget):
         self.file_results.clear()
         self.active_workers.clear()
 
+        self.processing_enabled = False
+
         self.file_table.setRowCount(0)
         for idx, filename in enumerate(self.pdf_files):
             self.file_table.insertRow(idx)
             self.file_table.setItem(idx, 0, QTableWidgetItem(filename))
-            self.file_table.setItem(idx, 1, QTableWidgetItem("Pending"))
+            self.file_table.setItem(idx, 1, QTableWidgetItem(filename))
 
         if not self.pdf_files:
             QMessageBox.information(self, "Info", "No PDFs found in folder.")
             return
 
         self.file_table.selectRow(0)
-        self.start_parallel_processing()
 
     # ------------------------------------------------------
     # Process One File
     # ------------------------------------------------------
 
     def process_current_file(self):
-        if not self.pdf_files:
+        if not self.pdf_files or not self.processing_enabled:
             return
 
         folder = self.input_edit.text()
@@ -650,8 +662,17 @@ class RenamerGUI(QWidget):
     # Button handlers
     # ------------------------------------------------------
 
-    def next_file(self):
+    def start_processing_clicked(self):
         if not self.pdf_files:
+            QMessageBox.information(self, "Info", "Select an input folder with PDFs first.")
+            return
+
+        self.stop_event.clear()
+        self.processing_enabled = True
+        self.start_parallel_processing()
+
+    def next_file(self):
+        if not self.pdf_files or not self.processing_enabled:
             return
 
         next_index = (self.current_index + 1) % len(self.pdf_files)
@@ -675,13 +696,14 @@ class RenamerGUI(QWidget):
         self.update_ocr_visibility()
 
         for row in range(self.file_table.rowCount()):
-            self.file_table.setItem(row, 1, QTableWidgetItem("Pending"))
+            current_name = self.file_table.item(row, 0).text()
+            self.file_table.setItem(row, 1, QTableWidgetItem(current_name))
 
         self.stop_event.clear()
         self.current_index = 0
+        self.processing_enabled = False
         if self.pdf_files:
             self.file_table.selectRow(0)
-            self.start_parallel_processing()
 
     def process_this_file(self):
         out_folder = self.output_edit.text()
@@ -762,7 +784,16 @@ class RenamerGUI(QWidget):
             self.apply_cached_result(row, self.file_results[row])
         else:
             self.current_index = row
-            self.process_current_file()
+            current_name = self.file_table.item(row, 1).text()
+            self.filename_edit.setText(current_name)
+            if not self.processing_enabled:
+                self.ocr_text = ""
+                self.meta = {}
+                self.ocr_view.clear()
+                self.char_count_label.setText("Characters retrieved: 0")
+                self.update_ocr_visibility()
+            if self.processing_enabled:
+                self.process_current_file()
 
     def handle_party_toggle(self, _checked: bool):
         # keep preference mutually exclusive
@@ -862,6 +893,8 @@ class RenamerGUI(QWidget):
         worker.start()
 
     def start_parallel_processing(self):
+        if not self.processing_enabled:
+            return
         if self.stop_event.is_set():
             return
         if not self.pdf_files:
