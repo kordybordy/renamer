@@ -339,13 +339,36 @@ def normalize_target_filename(name: str) -> str:
 
 
 def parse_json_content(content: str, source: str) -> dict:
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as e:
-        snippet = (content or "").strip()[:120]
-        raise ValueError(
-            f"{source} did not return valid JSON. Received: '{snippet or 'empty response'}'"
-        ) from e
+    raw = (content or "").strip()
+
+    def attempt_parse(text: str):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    # 1) Strip Markdown code fences like ```json ... ```
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+
+    parsed = attempt_parse(raw)
+
+    # 2) If still failing, try to isolate the JSON object boundaries
+    if parsed is None:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            trimmed = raw[start : end + 1]
+            parsed = attempt_parse(trimmed)
+
+    if parsed is not None:
+        return parsed
+
+    snippet = raw[:120]
+    raise ValueError(
+        f"{source} did not return valid JSON. Received: '{snippet or 'empty response'}'"
+    )
 
 
 def extract_metadata_openai(text: str, prompt: str) -> dict:
