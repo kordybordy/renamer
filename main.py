@@ -393,12 +393,37 @@ def extract_metadata_ollama(text: str, prompt: str) -> dict:
     try:
         resp = requests.post(endpoint, json=payload, timeout=60)
         resp.raise_for_status()
+    except requests.Timeout as e:
+        raise RuntimeError(
+            f"Ollama request to {endpoint} timed out after 60s. "
+            "Ensure the Ollama service is running locally and the model is downloaded."
+        ) from e
+    except requests.ConnectionError as e:
+        raise RuntimeError(
+            f"Could not connect to Ollama at {endpoint}. "
+            "Check that OLLAMA_HOST is correct (e.g., http://127.0.0.1:11434/) and that ollama serve is running."
+        ) from e
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response else "unknown"
+        body = (e.response.text or "").strip() if e.response is not None else ""
+        snippet = body[:500] + ("…" if len(body) > 500 else "")
+        raise RuntimeError(
+            f"Ollama at {endpoint} returned HTTP {status}. Response body: {snippet or 'no response body'}."
+        ) from e
     except requests.RequestException as e:
         raise RuntimeError(
-            f"Unable to reach Ollama at {endpoint}. Configure OLLAMA_HOST or switch AI backend."
+            f"Unexpected error contacting Ollama at {endpoint}: {e}. "
+            "Verify the local Ollama API is reachable."
         ) from e
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as e:
+        text = (resp.text or "").strip()
+        snippet = text[:500] + ("…" if len(text) > 500 else "")
+        raise RuntimeError(
+            f"Ollama at {endpoint} returned non-JSON content: {snippet or 'empty response'}."
+        ) from e
     content = data.get("message", {}).get("content", "{}")
     return parse_json_content(content, "Ollama chat response")
 
