@@ -383,7 +383,7 @@ def extract_metadata_openai(text: str, prompt: str) -> dict:
 
 def extract_metadata_ollama(text: str, prompt: str) -> dict:
     payload = {
-        "model": "llama3.1",
+        "model": "qwen2.5:7b",
         "messages": [
             {"role": "user", "content": prompt},
         ],
