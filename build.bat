@@ -17,6 +17,7 @@ pyinstaller ^
   --noconsole ^
   --name Renamer ^
   --icon "assets/logo.ico" ^
+  --add-data "assets;assets" ^
   --add-data "poppler;poppler" ^
   --add-data "tesseract;tesseract" ^
   main.py

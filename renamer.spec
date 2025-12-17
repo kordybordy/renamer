@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('poppler', 'poppler'), ('tesseract', 'tesseract')],
+    datas=[('assets', 'assets'), ('poppler', 'poppler'), ('tesseract', 'tesseract')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
