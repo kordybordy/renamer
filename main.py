@@ -227,6 +227,7 @@ class NamingOptions:
     ocr_enabled: bool
     ocr_char_limit: int
     ocr_dpi: int
+    ocr_pages: int
 
 
 def sanitize_case_number(case: str) -> str:
@@ -243,10 +244,20 @@ def normalize_target_filename(name: str) -> str:
     return name
 
 
-def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int) -> str:
+def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
     output_dir = tempfile.mkdtemp(prefix="ocr_")
     try:
-        cmd = [PDFTOPPM_EXE, "-r", str(dpi), pdf_path, os.path.join(output_dir, "page")]
+        cmd = [
+            PDFTOPPM_EXE,
+            "-f",
+            "1",
+            "-l",
+            str(max(1, pages)),
+            "-r",
+            str(dpi),
+            pdf_path,
+            os.path.join(output_dir, "page"),
+        ]
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         text_chunks: list[str] = []
         for png in sorted(glob.glob(os.path.join(output_dir, "page-*.png"))):
@@ -330,6 +341,7 @@ class FileProcessWorker(QThread):
                 self.pdf_path,
                 self.options.ocr_char_limit,
                 self.options.ocr_dpi,
+                self.options.ocr_pages,
             ) if self.options.ocr_enabled else ""
             meta = extract_metadata(ocr_text, self.requirements) if ocr_text else {}
             meta = apply_meta_defaults(meta, self.requirements)
@@ -446,6 +458,13 @@ class RenamerGUI(QWidget):
         self.ocr_dpi_spin.setValue(300)
         self.ocr_dpi_spin.valueChanged.connect(self.update_preview)
         h3b.addWidget(self.ocr_dpi_spin)
+
+        h3b.addWidget(QLabel("Pages to scan:"))
+        self.ocr_pages_spin = QSpinBox()
+        self.ocr_pages_spin.setRange(1, 50)
+        self.ocr_pages_spin.setValue(1)
+        self.ocr_pages_spin.valueChanged.connect(self.update_preview)
+        h3b.addWidget(self.ocr_pages_spin)
 
         self.char_count_label = QLabel("Characters retrieved: 0")
         h3b.addWidget(self.char_count_label)
@@ -788,6 +807,7 @@ class RenamerGUI(QWidget):
             ocr_enabled=self.run_ocr_checkbox.isChecked(),
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
+            ocr_pages=self.ocr_pages_spin.value(),
         )
 
     def display_name_for_element(self, element: str) -> str:
@@ -1128,6 +1148,7 @@ class RenamerGUI(QWidget):
             pdf_path,
             options.ocr_char_limit,
             options.ocr_dpi,
+            options.ocr_pages,
         ) if options.ocr_enabled else ""
 
         meta = extract_metadata(ocr_text, requirements) if ocr_text else {}
@@ -1186,7 +1207,9 @@ class RenamerGUI(QWidget):
         worker.finished.connect(self.handle_worker_finished)
         worker.failed.connect(self.handle_worker_failed)
         self.active_workers[index] = worker
-        self.set_status(f"Running OCR (DPI {options.ocr_dpi}) for file {index + 1}…")
+        self.set_status(
+            f"Running OCR ({options.ocr_pages} page(s) @ {options.ocr_dpi} DPI) for file {index + 1}…"
+        )
         self.log_activity(f"→ Processing file {index + 1}")
         worker.start()
 
@@ -1212,6 +1235,8 @@ class RenamerGUI(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setApplicationName("Renamer")
+    app.setApplicationDisplayName("Renamer")
     app.setStyleSheet(GLOBAL_STYLESHEET)
     logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
