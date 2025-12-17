@@ -50,6 +50,9 @@ FILENAME_RULES = {
 }
 
 
+DEFAULT_TEMPLATE_ELEMENTS = ["date", "plaintiff", "defendant", "letter_type"]
+
+
 # ===============================
 # Logging
 # ===============================
