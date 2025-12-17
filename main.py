@@ -27,9 +27,11 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QLineEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
     QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QTabWidget, QListWidget, QListWidgetItem
+    QTabWidget, QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
+    QStatusBar, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QSettings
+from PyQt6.QtGui import QPixmap, QIcon
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434/")
@@ -60,6 +62,93 @@ from datetime import datetime
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "ai_pdf_renamer_error.log")
 
+ACCENT_COLOR = "#4F7CFF"
+BACKGROUND_COLOR = "#1E1E1E"
+PANEL_COLOR = "#252526"
+TEXT_PRIMARY = "#FFFFFF"
+TEXT_SECONDARY = "#B0B0B0"
+BORDER_COLOR = "#333333"
+
+GLOBAL_STYLESHEET = f"""
+* {{
+    font-family: 'Segoe UI', sans-serif;
+    color: {TEXT_PRIMARY};
+}}
+
+QWidget {{
+    background-color: {BACKGROUND_COLOR};
+}}
+
+QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QSpinBox {{
+    background-color: {PANEL_COLOR};
+    border: 1px solid {BORDER_COLOR};
+    border-radius: 6px;
+    padding: 6px;
+    color: {TEXT_PRIMARY};
+}}
+
+QLabel {{
+    color: {TEXT_PRIMARY};
+}}
+
+QTabWidget::pane {{
+    border: 1px solid {BORDER_COLOR};
+    background: {PANEL_COLOR};
+    border-radius: 10px;
+    padding: 6px;
+}}
+
+QTabBar::tab {{
+    background: {PANEL_COLOR};
+    border: 1px solid {BORDER_COLOR};
+    border-bottom: none;
+    padding: 8px 16px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    margin-right: 4px;
+}}
+
+QTabBar::tab:selected {{
+    background: {ACCENT_COLOR};
+    color: {TEXT_PRIMARY};
+}}
+
+QTabBar::tab:hover {{
+    border-color: {ACCENT_COLOR};
+}}
+
+QPushButton {{
+    background-color: {ACCENT_COLOR};
+    border: 1px solid {ACCENT_COLOR};
+    color: {TEXT_PRIMARY};
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-weight: 600;
+}}
+
+QPushButton:hover {{
+    box-shadow: 0 0 8px {ACCENT_COLOR};
+}}
+
+QPushButton:disabled {{
+    background-color: {BORDER_COLOR};
+    border-color: {BORDER_COLOR};
+    color: {TEXT_SECONDARY};
+}}
+
+QProgressBar {{
+    background: {PANEL_COLOR};
+    border: 1px solid {BORDER_COLOR};
+    border-radius: 6px;
+    text-align: center;
+}}
+
+QProgressBar::chunk {{
+    background-color: {ACCENT_COLOR};
+    border-radius: 6px;
+}}
+"""
+
 def log_exception(e: Exception):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write("\n" + "=" * 60 + "\n")
@@ -68,6 +157,16 @@ def log_exception(e: Exception):
         f.write(traceback.format_exc())
         f.flush()
         os.fsync(f.fileno())
+
+
+def show_friendly_error(parent: QWidget, title: str, friendly: str, details: str):
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(friendly)
+    box.setInformativeText("Details were written to the log file.")
+    box.setDetailedText(details)
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.exec()
 
 # ===============================
 # BASE DIR
@@ -544,8 +643,10 @@ class FileProcessWorker(QThread):
 class RenamerGUI(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI PDF Renamer")
-        self.setGeometry(200, 200, 900, 700)
+        self.setWindowTitle("Renamer")
+        self.setGeometry(200, 200, 1000, 760)
+
+        self.settings = QSettings("Renamer", "Renamer")
 
         # State
         self.pdf_files = []
@@ -560,11 +661,30 @@ class RenamerGUI(QWidget):
 
         # ---------- Layout ----------
         root_layout = QVBoxLayout()
+
+        header = QHBoxLayout()
+        logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
+        pixmap = QPixmap(logo_path)
+        if not pixmap.isNull():
+            logo_label = QLabel()
+            logo_label.setPixmap(pixmap.scaled(QSize(40, 40), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            header.addWidget(logo_label)
+        title_col = QVBoxLayout()
+        title_label = QLabel("Renamer")
+        title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
+        subtitle_label = QLabel("Smart document naming")
+        subtitle_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        title_col.addWidget(title_label)
+        title_col.addWidget(subtitle_label)
+        header.addLayout(title_col)
+        header.addStretch()
+        root_layout.addLayout(header)
+
         self.tabs = QTabWidget()
         self.main_tab = QWidget()
         self.settings_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Main")
-        self.tabs.addTab(self.settings_tab, "AI & Filename Settings")
+        self.tabs.addTab(self.settings_tab, "AI Filename Settings")
         root_layout.addWidget(self.tabs)
 
         self.main_layout = QVBoxLayout()
@@ -596,6 +716,7 @@ class RenamerGUI(QWidget):
         h3b = QHBoxLayout()
         self.run_ocr_checkbox = QCheckBox("Run OCR")
         self.run_ocr_checkbox.setChecked(True)
+        self.run_ocr_checkbox.toggled.connect(self.update_preview)
         h3b.addWidget(self.run_ocr_checkbox)
 
         h3b.addWidget(QLabel("Max characters:"))
@@ -603,12 +724,14 @@ class RenamerGUI(QWidget):
         self.char_limit_spin.setRange(100, 10000)
         self.char_limit_spin.setSingleStep(100)
         self.char_limit_spin.setValue(1500)
+        self.char_limit_spin.valueChanged.connect(self.update_preview)
         h3b.addWidget(self.char_limit_spin)
 
         h3b.addWidget(QLabel("OCR DPI:"))
         self.ocr_dpi_spin = QSpinBox()
         self.ocr_dpi_spin.setRange(72, 600)
         self.ocr_dpi_spin.setValue(300)
+        self.ocr_dpi_spin.valueChanged.connect(self.update_preview)
         h3b.addWidget(self.ocr_dpi_spin)
 
         self.char_count_label = QLabel("Characters retrieved: 0")
@@ -638,20 +761,19 @@ class RenamerGUI(QWidget):
         self.template_list.setSelectionMode(
             self.template_list.SelectionMode.SingleSelection
         )
+        self.template_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.template_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.template_list.model().rowsMoved.connect(lambda *_: self.update_preview())
         for element in DEFAULT_TEMPLATE_ELEMENTS:
-            self.add_template_item(element)
+            self.add_template_item(element, refresh=False)
+        self.update_preview()
         list_col.addWidget(self.template_list)
 
         buttons_col = QVBoxLayout()
-        move_up_btn = QPushButton("Move up")
-        move_up_btn.clicked.connect(self.move_template_element_up)
-        move_down_btn = QPushButton("Move down")
-        move_down_btn.clicked.connect(self.move_template_element_down)
         remove_btn = QPushButton("Remove")
         remove_btn.clicked.connect(self.remove_selected_template_element)
 
-        for btn in (move_up_btn, move_down_btn, remove_btn):
-            buttons_col.addWidget(btn)
+        buttons_col.addWidget(remove_btn)
         buttons_col.addStretch()
         list_col.addLayout(buttons_col)
 
@@ -667,7 +789,11 @@ class RenamerGUI(QWidget):
             "Auto (Local → Cloud)",
         ])
         self.backend_combo.setCurrentIndex(1)
+        self.backend_combo.setToolTip("OpenAI = cloud (cost). Ollama = local (free). Auto tries local then cloud.")
+        self.backend_combo.currentIndexChanged.connect(self.check_ollama_status)
         backend_row.addWidget(self.backend_combo)
+        self.ollama_badge = QLabel("")
+        backend_row.addWidget(self.ollama_badge)
         backend_row.addStretch()
         self.settings_layout.addLayout(backend_row)
         
@@ -690,8 +816,18 @@ class RenamerGUI(QWidget):
         h4.addWidget(self.filename_edit)
         self.main_layout.addLayout(h4)
 
+        preview_row = QHBoxLayout()
+        preview_label = QLabel("Live preview:")
+        preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        preview_row.addWidget(preview_label)
+        self.preview_value = QLabel("—")
+        self.preview_value.setStyleSheet("font-weight: 600;")
+        preview_row.addWidget(self.preview_value)
+        preview_row.addStretch()
+        self.main_layout.addLayout(preview_row)
+
         play_row = QHBoxLayout()
-        self.play_button = QPushButton("▶ Play (Generate Proposals)")
+        self.play_button = QPushButton("▶ Generate")
         self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
         self.play_button.clicked.connect(self.start_processing_clicked)
         play_row.addStretch()
@@ -705,11 +841,11 @@ class RenamerGUI(QWidget):
         btn_next.clicked.connect(self.next_file)
         self.btn_next = btn_next
 
-        btn_process = QPushButton("Process This File")
+        btn_process = QPushButton("✎ Rename File")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
 
-        btn_all = QPushButton("Process All")
+        btn_all = QPushButton("⏩ Rename All")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
@@ -722,9 +858,128 @@ class RenamerGUI(QWidget):
         h5.addWidget(btn_quit)
         self.main_layout.addLayout(h5)
 
+        # Activity log panel
+        log_header = QHBoxLayout()
+        self.log_toggle = QPushButton("▼ What is happening now")
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setChecked(True)
+        self.log_toggle.clicked.connect(self.toggle_log)
+        self.log_toggle.setStyleSheet("text-align: left;")
+        log_header.addWidget(self.log_toggle)
+        log_header.addStretch()
+        self.main_layout.addLayout(log_header)
+
+        self.activity_log = QTextEdit()
+        self.activity_log.setReadOnly(True)
+        self.activity_log.setMaximumHeight(120)
+        self.main_layout.addWidget(self.activity_log)
+
+        # Status bar
+        self.status_bar = QStatusBar()
+        self.status_label = QLabel("Waiting for input…")
+        self.spinner_label = QLabel("")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        status_widget = QWidget()
+        status_layout = QHBoxLayout()
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.addWidget(self.spinner_label)
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.progress_bar)
+        status_widget.setLayout(status_layout)
+        self.status_bar.addPermanentWidget(status_widget, 1)
+        root_layout.addWidget(self.status_bar)
+
         self.setLayout(root_layout)
 
         self.processing_enabled = False
+        self.spinner_timer = QTimer(self)
+        self.spinner_timer.timeout.connect(self.animate_spinner)
+        self.spinner_state = 0
+        self.activity_entries: list[str] = []
+
+        self.load_settings()
+        self.update_preview()
+        self.check_ollama_status()
+
+    # ------------------------------------------------------
+    # UI helpers
+    # ------------------------------------------------------
+
+    def load_settings(self):
+        self.input_edit.setText(self.settings.value("input_folder", ""))
+        self.output_edit.setText(self.settings.value("output_folder", ""))
+        saved_template = self.settings.value("template", [])
+        if isinstance(saved_template, str):
+            saved_template = json.loads(saved_template) if saved_template else []
+        if saved_template:
+            self.template_list.clear()
+            for element in saved_template:
+                self.add_template_item(element)
+
+    def save_settings(self):
+        self.settings.setValue("input_folder", self.input_edit.text())
+        self.settings.setValue("output_folder", self.output_edit.text())
+        self.settings.setValue("template", self.get_template_elements())
+
+    def closeEvent(self, event):
+        self.save_settings()
+        super().closeEvent(event)
+
+    def toggle_log(self):
+        visible = not self.activity_log.isVisible()
+        self.activity_log.setVisible(visible)
+        self.log_toggle.setText(("▼" if visible else "▶") + " What is happening now")
+
+    def log_activity(self, message: str):
+        self.activity_entries.append(message)
+        self.activity_entries = self.activity_entries[-10:]
+        self.activity_log.setText("\n".join(self.activity_entries))
+
+    def set_status(self, text: str):
+        if not text:
+            text = "Working…"
+        self.status_label.setText(text)
+
+    def animate_spinner(self):
+        dots = "." * (self.spinner_state % 4)
+        self.spinner_label.setText(f"⏳{dots}")
+        self.spinner_state += 1
+
+    def start_processing_ui(self, status: str = "Processing…"):
+        self.set_status(status)
+        self.progress_bar.setRange(0, 0)
+        self.spinner_timer.start(300)
+        for btn in (self.play_button, self.btn_process, self.btn_all, self.btn_next):
+            btn.setDisabled(True)
+
+    def stop_processing_ui(self, status: str = "Idle"):
+        self.set_status(status)
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.spinner_timer.stop()
+        self.spinner_label.setText("")
+        for btn in (self.play_button, self.btn_process, self.btn_all, self.btn_next):
+            btn.setDisabled(False)
+
+    def check_ollama_status(self):
+        if self.backend_combo.currentIndex() != 1:
+            self.ollama_badge.setText("")
+            return
+        try:
+            resp = requests.get(urljoin(OLLAMA_HOST, "api/tags"), timeout=2)
+            ok = resp.status_code == 200
+        except Exception:
+            ok = False
+        if ok:
+            self.ollama_badge.setText("🟢 Connected")
+            self.ollama_badge.setStyleSheet("color: #7CFC00;")
+        else:
+            self.ollama_badge.setText("🔴 Offline")
+            self.ollama_badge.setStyleSheet("color: #FF6B6B;")
 
     # ------------------------------------------------------
     # Folder Selection
@@ -739,11 +994,11 @@ class RenamerGUI(QWidget):
             self.load_pdfs()
         except Exception as e:
             log_exception(e)
-            QMessageBox.critical(
+            show_friendly_error(
                 self,
-                "Unhandled error",
-                f"An error occurred while selecting input folder.\n\n"
-                f"Details were written to:\n{LOG_FILE}"
+                "Folder error",
+                "Renamer could not open the selected input folder.",
+                traceback.format_exc(),
             )
 
     def choose_output(self):
@@ -754,11 +1009,11 @@ class RenamerGUI(QWidget):
             self.output_edit.setText(folder)
         except Exception as e:
             log_exception(e)
-            QMessageBox.critical(
+            show_friendly_error(
                 self,
-                "Unhandled error",
-                f"An error occurred while selecting output folder.\n\n"
-                f"Details were written to:\n{LOG_FILE}"
+                "Folder error",
+                "Renamer could not open the selected output folder.",
+                traceback.format_exc(),
             )
 
     # ------------------------------------------------------
@@ -777,6 +1032,8 @@ class RenamerGUI(QWidget):
         self.file_results.clear()
         self.active_workers.clear()
         self.failed_indices.clear()
+        self.log_activity(f"Loaded {len(self.pdf_files)} PDF files")
+        self.set_status("Waiting for generate…")
 
         self.processing_enabled = False
 
@@ -817,10 +1074,12 @@ class RenamerGUI(QWidget):
         }
         return mapping.get(element, element)
 
-    def add_template_item(self, element: str):
+    def add_template_item(self, element: str, refresh: bool = True):
         item = QListWidgetItem(self.display_name_for_element(element))
         item.setData(Qt.ItemDataRole.UserRole, element)
         self.template_list.addItem(item)
+        if refresh:
+            self.update_preview()
 
     def add_template_element(self):
         element = self.template_selector.currentData()
@@ -832,6 +1091,7 @@ class RenamerGUI(QWidget):
         row = self.template_list.currentRow()
         if row >= 0:
             self.template_list.takeItem(row)
+            self.update_preview()
 
     def move_template_element_up(self):
         row = self.template_list.currentRow()
@@ -860,9 +1120,26 @@ class RenamerGUI(QWidget):
         if not elements:
             elements = DEFAULT_TEMPLATE_ELEMENTS[:]
             for element in elements:
-                self.add_template_item(element)
+                self.add_template_item(element, refresh=False)
 
         return elements
+
+    def update_preview(self):
+        options = self.build_options()
+        meta = self.meta or {}
+        if self.current_index in self.file_results:
+            meta = self.file_results[self.current_index].get("meta", meta)
+        requirements = requirements_from_template(options.template_elements)
+        meta = apply_meta_defaults(meta, requirements)
+        filename = build_filename(meta, options)
+        display_name = filename or "—"
+        self.preview_value.setText(display_name)
+        if filename:
+            self.filename_edit.blockSignals(True)
+            self.filename_edit.setText(filename)
+            self.filename_edit.blockSignals(False)
+            if self.current_index < self.file_table.rowCount():
+                self.file_table.setItem(self.current_index, 1, QTableWidgetItem(filename))
 
     # ------------------------------------------------------
     # Process One File
@@ -892,6 +1169,7 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
         self.failed_indices.clear()
         self.processing_enabled = True
+        self.start_processing_ui("Generating proposals…")
         self.start_parallel_processing()
 
     def next_file(self):
@@ -926,6 +1204,7 @@ class RenamerGUI(QWidget):
         self.processing_enabled = False
         if self.pdf_files:
             self.file_table.selectRow(0)
+        self.stop_processing_ui("Reset")
 
     def process_this_file(self):
         out_folder = self.output_edit.text()
@@ -939,6 +1218,7 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
 
         self.update_filename_for_current_row()
+        self.start_processing_ui("Renaming current file…")
 
         pdf_name = self.pdf_files[self.current_index]
         inp = os.path.join(self.input_edit.text(), pdf_name)
@@ -960,6 +1240,8 @@ class RenamerGUI(QWidget):
         except Exception as e:
             log_exception(e)
             QMessageBox.critical(self, "Error", f"Failed to rename file:\n{e}")
+        finally:
+            self.stop_processing_ui("Idle")
 
     def process_all_files_safe(self):
         out_folder = self.output_edit.text()
@@ -971,6 +1253,7 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
+        self.start_processing_ui("Renaming all files…")
         for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
@@ -1000,6 +1283,7 @@ class RenamerGUI(QWidget):
                 continue
 
         QMessageBox.information(self, "Done", "All files processed.")
+        self.stop_processing_ui("Idle")
 
     def process_all(self):
         out_folder = self.output_edit.text()
@@ -1031,6 +1315,9 @@ class RenamerGUI(QWidget):
         self.file_results[index] = result
         self.apply_cached_result(index, result)
         self.start_parallel_processing()
+        self.log_activity(f"✓ Processed file {index + 1} of {len(self.pdf_files)}")
+        if not self.active_workers:
+            self.stop_processing_ui("Idle")
 
     def handle_worker_failed(self, index: int, error: Exception):
         self.active_workers.pop(index, None)
@@ -1039,9 +1326,14 @@ class RenamerGUI(QWidget):
         self.failed_indices.add(index)
         QMessageBox.critical(self, "Error", f"Failed processing file at index {index}: {error}")
         self.start_parallel_processing()
+        if not self.active_workers:
+            self.stop_processing_ui("Idle")
 
     def on_row_selected(self, row: int, _col: int):
         self.current_index = row
+        item = self.file_table.item(row, 0)
+        if item:
+            self.file_table.scrollToItem(item)
 
         if row in self.file_results:
             self.apply_cached_result(row, self.file_results[row])
@@ -1055,6 +1347,7 @@ class RenamerGUI(QWidget):
                 self.char_count_label.setText("Characters retrieved: 0")
             if self.processing_enabled:
                 self.process_current_file()
+        self.update_preview()
 
     def generate_result_for_index(self, index: int) -> dict:
         pdf = self.pdf_files[index]
@@ -1089,6 +1382,7 @@ class RenamerGUI(QWidget):
             self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
 
         self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
+        self.update_preview()
 
     def update_filename_for_current_row(self):
         if not self.pdf_files:
@@ -1124,6 +1418,8 @@ class RenamerGUI(QWidget):
         worker.finished.connect(self.handle_worker_finished)
         worker.failed.connect(self.handle_worker_failed)
         self.active_workers[index] = worker
+        self.set_status(f"Running OCR (DPI {options.ocr_dpi}) for file {index + 1}…")
+        self.log_activity(f"→ Processing file {index + 1}")
         worker.start()
 
     def start_parallel_processing(self):
@@ -1148,6 +1444,12 @@ class RenamerGUI(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet(GLOBAL_STYLESHEET)
+    logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
+    if os.path.exists(logo_path):
+        app.setWindowIcon(QIcon(logo_path))
     gui = RenamerGUI()
+    if os.path.exists(logo_path):
+        gui.setWindowIcon(QIcon(logo_path))
     gui.show()
     sys.exit(app.exec())

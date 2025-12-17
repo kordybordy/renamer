@@ -11,7 +11,8 @@ del /q main.spec 2>nul
 pyinstaller ^
   --onefile ^
   --noconsole ^
-  --name renamer ^
+  --name Renamer ^
+  --icon "assets/logo.ico" ^
   --add-data "poppler;poppler" ^
   --add-data "tesseract;tesseract" ^
   main.py
