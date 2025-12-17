@@ -387,6 +387,10 @@ class RenamerGUI(QWidget):
         self.max_parallel_workers = 3
         self.stop_event = threading.Event()
 
+        # Widgets used across the UI
+        self.preview_value = QLabel("—")
+        self.preview_value.setStyleSheet("font-weight: 600;")
+
         # ---------- Layout ----------
         root_layout = QVBoxLayout()
 
@@ -555,8 +559,6 @@ class RenamerGUI(QWidget):
         preview_label = QLabel("Live preview:")
         preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
         preview_row.addWidget(preview_label)
-        self.preview_value = QLabel("—")
-        self.preview_value.setStyleSheet("font-weight: 600;")
         preview_row.addWidget(self.preview_value)
         preview_row.addStretch()
         self.main_layout.addLayout(preview_row)
