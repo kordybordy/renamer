@@ -386,6 +386,7 @@ class RenamerGUI(QWidget):
         self.failed_indices: set[int] = set()
         self.max_parallel_workers = 3
         self.stop_event = threading.Event()
+        self.ui_ready = False
 
         # Widgets used across the UI
         self.preview_value = QLabel("—")
@@ -639,6 +640,7 @@ class RenamerGUI(QWidget):
         self.activity_entries: list[str] = []
 
         self.load_settings()
+        self.ui_ready = True
         self.update_preview()
         self.check_ollama_status()
 
@@ -875,6 +877,8 @@ class RenamerGUI(QWidget):
         return elements
 
     def update_preview(self):
+        if not getattr(self, "ui_ready", False):
+            return
         options = self.build_options()
         meta = self.meta or {}
         if self.current_index in self.file_results:
