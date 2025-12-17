@@ -239,6 +239,15 @@ def sanitize_case_number(case: str) -> str:
     return case
 
 
+def clean_party_name(raw: str) -> str:
+    """Normalize party names extracted from OCR text."""
+
+    name = raw.strip().strip("-:;•")
+    name = re.sub(r"\s{2,}", " ", name)
+    name = re.sub(r"^[\d.\)]+\s*", "", name)
+    return name[:80]
+
+
 def normalize_target_filename(name: str) -> str:
     name = name.strip()
     name = re.sub(r"[\\/:*?\"<>|]", "_", name)
@@ -316,11 +325,34 @@ def extract_metadata(ocr_text: str, requirements: dict) -> dict:
     if not ocr_text:
         return {}
     meta: dict[str, str] = {}
+
     lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
-    if requirements.get("plaintiff") and lines:
-        meta["plaintiff"] = lines[0][:80]
-    if requirements.get("defendant") and len(lines) > 1:
-        meta["defendant"] = lines[1][:80]
+
+    def find_party(patterns: list[str], fallback_index: int | None = None) -> str:
+        for line in lines:
+            for pattern in patterns:
+                match = re.search(pattern, line, flags=re.IGNORECASE)
+                if match and match.group("name"):
+                    return clean_party_name(match.group("name"))
+        if fallback_index is not None and len(lines) > fallback_index:
+            return clean_party_name(lines[fallback_index])
+        return ""
+
+    if requirements.get("plaintiff"):
+        plaintiff = find_party(
+            [r"\bpow[oó]d(?:ka|owie)?\s*[:\-]\s*(?P<name>.+)", r"\bwnioskodawc[ay]\s*[:\-]\s*(?P<name>.+)"],
+            fallback_index=0,
+        )
+        if plaintiff:
+            meta["plaintiff"] = plaintiff
+
+    if requirements.get("defendant"):
+        defendant = find_party(
+            [r"\bpozwany(?:ch)?\s*[:\-]\s*(?P<name>.+)", r"\buczestnik(?:a)?\s*[:\-]\s*(?P<name>.+)"],
+            fallback_index=1,
+        )
+        if defendant:
+            meta["defendant"] = defendant
     return meta
 
 
