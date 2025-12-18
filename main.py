@@ -951,7 +951,18 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
+        self.active_workers.clear()
         self.failed_indices.clear()
+        self.file_results.clear()
+        self.ocr_text = ""
+        self.meta = {}
+        self.filename_edit.clear()
+        self.char_count_label.setText("Characters retrieved: 0")
+        for row in range(self.file_table.rowCount()):
+            source_item = self.file_table.item(row, 0)
+            current_name = source_item.text() if source_item else ""
+            self.file_table.setItem(row, 1, QTableWidgetItem(current_name))
+        self.current_index = 0
         self.processing_enabled = True
         log_info(
             f"Starting generation for {len(self.pdf_files)} files using backend {self.get_ai_backend()}"
