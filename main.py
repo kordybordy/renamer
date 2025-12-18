@@ -249,12 +249,57 @@ def sanitize_case_number(case: str) -> str:
 
 
 def clean_party_name(raw: str) -> str:
-    """Normalize party names extracted from OCR text."""
+    """Normalize party names extracted from OCR text while stripping address tails."""
 
     name = raw.strip().strip("-:;•")
     name = re.sub(r"\s{2,}", " ", name)
     name = re.sub(r"^[\d.\)]+\s*", "", name)
+
+    # Remove obvious address fragments that often trail an entity name
+    address_markers = [
+        r"\b\d{2}-\d{3}\b",  # postal code
+        r"\bul\.?\b",
+        r"\bal\.?\b",
+        r"\bpl\.?\b",
+        r"\bplac\b",
+        r"\baleja\b",
+    ]
+    for marker in address_markers:
+        match = re.search(marker, name, flags=re.IGNORECASE)
+        if match:
+            name = name[: match.start()].rstrip(",; -")
+            break
+
     return name[:80]
+
+
+def is_address_line(text: str, raw: str | None = None) -> bool:
+    """Heuristic check to skip address-only lines when inferring parties."""
+
+    haystack = " ".join(part for part in (raw, text) if part)
+
+    if re.search(r"\b\d{2}-\d{3}\b", haystack):  # postal code present
+        return True
+
+    street_markers = ["ul.", "ul ", "al.", "al ", "pl.", "plac", "aleja"]
+    lowered = haystack.lower()
+    if any(marker in lowered for marker in street_markers):
+        return True
+
+    # Lines combining a street-like suffix with a house number are addresses
+    if re.search(r"\b\d+[a-z]?(/\d+)?\b", haystack) and any(
+        word.endswith(("ska", "skiej", "skiego", "owej", "ego")) for word in lowered.split()
+    ):
+        return True
+
+    # Common location tokens combined with digits signal an address
+    location_tokens = {"polska", "warszawa", "krak", "poznan", "gdańsk", "wrocław"}
+    if any(token in lowered for token in location_tokens) and re.search(r"\d", haystack):
+        return True
+
+    # Treat lines dominated by numbers (house numbers, floors, etc.) as addresses
+    digit_tokens = sum(1 for token in re.split(r"\s+", haystack) if re.search(r"\d", token))
+    return digit_tokens >= 2
 
 
 def normalize_target_filename(name: str) -> str:
@@ -353,9 +398,16 @@ def extract_metadata(ocr_text: str, requirements: dict) -> dict:
             for pattern in patterns:
                 match = re.search(pattern, line, flags=re.IGNORECASE)
                 if match and match.group("name"):
-                    return clean_party_name(match.group("name"))
+                    raw_candidate = match.group("name").strip()
+                    candidate = clean_party_name(raw_candidate)
+                    if candidate and not is_address_line(candidate, raw=raw_candidate):
+                        return candidate
         if fallback_index is not None and len(lines) > fallback_index:
-            return clean_party_name(lines[fallback_index])
+            for idx in range(fallback_index, len(lines)):
+                candidate_raw = lines[idx]
+                candidate = clean_party_name(candidate_raw)
+                if candidate and not is_address_line(candidate, raw=candidate_raw):
+                    return candidate
         return ""
 
     if requirements.get("plaintiff"):
@@ -651,6 +703,17 @@ class RenamerGUI(QWidget):
         preview_row.addStretch()
         self.main_layout.addLayout(preview_row)
 
+        self.ocr_preview_label = QLabel("OCR text sent to AI:")
+        self.ocr_preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        self.ocr_preview = QTextEdit()
+        self.ocr_preview.setReadOnly(True)
+        self.ocr_preview.setPlaceholderText(
+            "The OCR excerpt forwarded to the AI/backend will appear here."
+        )
+        self.ocr_preview.setMinimumHeight(140)
+        self.main_layout.addWidget(self.ocr_preview_label)
+        self.main_layout.addWidget(self.ocr_preview)
+
         play_row = QHBoxLayout()
         self.play_button = QPushButton("▶ Generate")
         self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
@@ -945,6 +1008,10 @@ class RenamerGUI(QWidget):
 
         return elements
 
+    def update_ocr_preview(self, text: str):
+        if hasattr(self, "ocr_preview"):
+            self.ocr_preview.setPlainText(text or "")
+
     def update_preview(self):
         if not getattr(self, "ui_ready", False):
             return
@@ -1004,6 +1071,7 @@ class RenamerGUI(QWidget):
         self.meta = {}
         self.filename_edit.clear()
         self.char_count_label.setText("Characters retrieved: 0")
+        self.update_ocr_preview("")
         for row in range(self.file_table.rowCount()):
             source_item = self.file_table.item(row, 0)
             current_name = source_item.text() if source_item else ""
@@ -1031,6 +1099,7 @@ class RenamerGUI(QWidget):
         self.meta = {}
         self.filename_edit.clear()
         self.char_count_label.setText("Characters retrieved: 0")
+        self.update_ocr_preview("")
 
         for row in range(self.file_table.rowCount()):
             current_name = self.file_table.item(row, 0).text()
@@ -1223,6 +1292,7 @@ class RenamerGUI(QWidget):
                 self.ocr_text = ""
                 self.meta = {}
                 self.char_count_label.setText("Characters retrieved: 0")
+                self.update_ocr_preview("")
             if self.processing_enabled:
                 self.process_current_file()
         self.update_preview()
@@ -1279,6 +1349,7 @@ class RenamerGUI(QWidget):
             self.meta = cached.get("meta", {})
             self.filename_edit.setText(cached.get("filename", ""))
             self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
+            self.update_ocr_preview(self.ocr_text)
 
         self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
         self.update_preview()
