@@ -266,12 +266,6 @@ class NamingOptions:
     ocr_pages: int
 
 
-def sanitize_case_number(case: str) -> str:
-    case = case.strip()
-    case = re.sub(r"\s+", " ", case)
-    return case
-
-
 def clean_party_name(raw: str) -> str:
     """Normalize party names extracted from OCR text while stripping address tails."""
 
@@ -295,35 +289,6 @@ def clean_party_name(raw: str) -> str:
             break
 
     return name[:80]
-
-
-def is_address_line(text: str, raw: str | None = None) -> bool:
-    """Heuristic check to skip address-only lines when inferring parties."""
-
-    haystack = " ".join(part for part in (raw, text) if part)
-
-    if re.search(r"\b\d{2}-\d{3}\b", haystack):  # postal code present
-        return True
-
-    street_markers = ["ul.", "ul ", "al.", "al ", "pl.", "plac", "aleja"]
-    lowered = haystack.lower()
-    if any(marker in lowered for marker in street_markers):
-        return True
-
-    # Lines combining a street-like suffix with a house number are addresses
-    if re.search(r"\b\d+[a-z]?(/\d+)?\b", haystack) and any(
-        word.endswith(("ska", "skiej", "skiego", "owej", "ego")) for word in lowered.split()
-    ):
-        return True
-
-    # Common location tokens combined with digits signal an address
-    location_tokens = {"polska", "warszawa", "krak", "poznan", "gdańsk", "wrocław"}
-    if any(token in lowered for token in location_tokens) and re.search(r"\d", haystack):
-        return True
-
-    # Treat lines dominated by numbers (house numbers, floors, etc.) as addresses
-    digit_tokens = sum(1 for token in re.split(r"\s+", haystack) if re.search(r"\d", token))
-    return digit_tokens >= 2
 
 
 def normalize_target_filename(name: str) -> str:
@@ -421,11 +386,41 @@ def call_ollama_model(text: str) -> str:
         return ""
 
 
+def parse_json_content(content: str, source: str) -> dict:
+    """Parse JSON content from AI responses, stripping code fences if present."""
+
+    raw = (content or "").strip()
+
+    def attempt_parse(text: str):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+
+    parsed = attempt_parse(raw)
+    if parsed is None:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = attempt_parse(raw[start : end + 1])
+
+    if parsed is None:
+        snippet = raw[:120]
+        raise ValueError(
+            f"{source} did not return valid JSON. Received: '{snippet or 'empty response'}'"
+        )
+    return parsed
+
+
 def parse_ai_metadata(raw: str) -> dict:
     """Convert AI JSON into the meta structure expected by the app."""
 
     try:
-        data = json.loads(raw)
+        data = parse_json_content(raw, "AI response")
     except Exception:
         return {}
 
@@ -524,48 +519,6 @@ def build_filename(meta: dict, options: NamingOptions) -> str:
     return filename
 
 
-def extract_metadata(ocr_text: str, requirements: dict) -> dict:
-    if not ocr_text:
-        return {}
-    meta: dict[str, str] = {}
-
-    lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
-
-    def find_party(patterns: list[str], fallback_index: int | None = None) -> str:
-        for line in lines:
-            for pattern in patterns:
-                match = re.search(pattern, line, flags=re.IGNORECASE)
-                if match and match.group("name"):
-                    raw_candidate = match.group("name").strip()
-                    candidate = clean_party_name(raw_candidate)
-                    if candidate and not is_address_line(candidate, raw=raw_candidate):
-                        return candidate
-        if fallback_index is not None and len(lines) > fallback_index:
-            for idx in range(fallback_index, len(lines)):
-                candidate_raw = lines[idx]
-                candidate = clean_party_name(candidate_raw)
-                if candidate and not is_address_line(candidate, raw=candidate_raw):
-                    return candidate
-        return ""
-
-    if requirements.get("plaintiff"):
-        plaintiff = find_party(
-            [r"\bpow[oó]d(?:ka|owie)?\s*[:\-]\s*(?P<name>.+)", r"\bwnioskodawc[ay]\s*[:\-]\s*(?P<name>.+)"],
-            fallback_index=0,
-        )
-        if plaintiff:
-            meta["plaintiff"] = plaintiff
-
-    if requirements.get("defendant"):
-        defendant = find_party(
-            [r"\bpozwany(?:ch)?\s*[:\-]\s*(?P<name>.+)", r"\buczestnik(?:a)?\s*[:\-]\s*(?P<name>.+)"],
-            fallback_index=1,
-        )
-        if defendant:
-            meta["defendant"] = defendant
-    return meta
-
-
 class FileProcessWorker(QThread):
     finished = pyqtSignal(int, dict)
     failed = pyqtSignal(int, Exception)
@@ -609,7 +562,7 @@ class FileProcessWorker(QThread):
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
             ai_meta = extract_metadata_ai(ocr_text, self.backend)
-            meta = ai_meta or (extract_metadata(ocr_text, self.requirements) if ocr_text else {})
+            meta = ai_meta or {}
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
             ]
@@ -1462,7 +1415,7 @@ class RenamerGUI(QWidget):
             )
 
         ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend())
-        meta = ai_meta or (extract_metadata(ocr_text, requirements) if ocr_text else {})
+        meta = ai_meta or {}
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
 
