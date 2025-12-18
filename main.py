@@ -270,6 +270,7 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
     try:
         cmd = [
             PDFTOPPM_EXE,
+            "-png",
             "-f",
             "1",
             "-l",
@@ -280,9 +281,19 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             os.path.join(output_dir, "page"),
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.png")))
+        if not image_paths:
+            # Fallback for environments where pdftoppm defaults to PPM
+            image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.ppm")))
+
+        if not image_paths:
+            raise RuntimeError(
+                f"pdftoppm produced no output images for '{os.path.basename(pdf_path)}'"
+            )
+
         text_chunks: list[str] = []
-        for png in sorted(glob.glob(os.path.join(output_dir, "page-*.png"))):
-            chunk = pytesseract.image_to_string(Image.open(png), lang="pol")
+        for image_file in image_paths:
+            chunk = pytesseract.image_to_string(Image.open(image_file), lang="pol")
             text_chunks.append(chunk)
             if len("".join(text_chunks)) >= char_limit:
                 break
