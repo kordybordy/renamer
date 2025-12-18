@@ -132,3 +132,26 @@ python -m compileall main.py
 
 Code must compile without errors
 Do not ignore syntax warnings or failures
+10. Documentation of Changes (Required)
+
+Every change must include:
+
+A clear summary of what was changed and why
+
+A Testing section listing commands run (at minimum: compileall)
+
+11. What NOT to Do
+
+❌ Do not invent new folders
+❌ Do not split main.py without permission
+❌ Do not remove OpenAI or Ollama support
+❌ Do not redesign the GUI
+❌ Do not assume signal order or timing
+
+12. Final Rule
+
+If your assumptions conflict with this file:
+➡️ This file wins.
+
+If something is unclear:
+➡️ Ask the user instead of guessing.
