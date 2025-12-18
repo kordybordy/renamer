@@ -403,7 +403,7 @@ def call_ollama_model(text: str) -> str:
 
     try:
         payload = {
-            "model": "llama3",
+            "model": "qwen2.5:7b",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
