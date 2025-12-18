@@ -158,6 +158,15 @@ def log_exception(e: Exception):
         os.fsync(f.fileno())
 
 
+def log_info(message: str):
+    entry = f"{datetime.now().isoformat()} INFO {message}"
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    print(entry)
+
+
 def show_friendly_error(
     parent: QWidget,
     title: str,
@@ -607,9 +616,6 @@ class RenamerGUI(QWidget):
 
         # Buttons row
         h5 = QHBoxLayout()
-        btn_next = QPushButton("Next File")
-        btn_next.clicked.connect(self.next_file)
-        self.btn_next = btn_next
 
         btn_process = QPushButton("✎ Rename File")
         btn_process.clicked.connect(self.process_this_file)
@@ -622,27 +628,15 @@ class RenamerGUI(QWidget):
         btn_quit = QPushButton("Quit")
         btn_quit.clicked.connect(self.close)
 
-        h5.addWidget(btn_next)
         h5.addWidget(btn_process)
         h5.addWidget(btn_all)
         h5.addWidget(btn_quit)
         self.main_layout.addLayout(h5)
 
-        # Activity log panel
-        log_header = QHBoxLayout()
-        self.log_toggle = QPushButton("▼ What is happening now")
-        self.log_toggle.setCheckable(True)
-        self.log_toggle.setChecked(True)
-        self.log_toggle.clicked.connect(self.toggle_log)
-        self.log_toggle.setStyleSheet("text-align: left;")
-        log_header.addWidget(self.log_toggle)
-        log_header.addStretch()
-        self.main_layout.addLayout(log_header)
-
-        self.activity_log = QTextEdit()
-        self.activity_log.setReadOnly(True)
-        self.activity_log.setMaximumHeight(120)
-        self.main_layout.addWidget(self.activity_log)
+        copyright_label = QLabel("Copyright 2025-2026 Przemek1337 all rights reserved")
+        copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        copyright_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        self.main_layout.addWidget(copyright_label)
 
         # Status bar
         self.status_bar = QStatusBar()
@@ -669,7 +663,6 @@ class RenamerGUI(QWidget):
         self.spinner_timer = QTimer(self)
         self.spinner_timer.timeout.connect(self.animate_spinner)
         self.spinner_state = 0
-        self.activity_entries: list[str] = []
 
         self.load_settings()
         self.ui_ready = True
@@ -700,15 +693,8 @@ class RenamerGUI(QWidget):
         self.save_settings()
         super().closeEvent(event)
 
-    def toggle_log(self):
-        visible = not self.activity_log.isVisible()
-        self.activity_log.setVisible(visible)
-        self.log_toggle.setText(("▼" if visible else "▶") + " What is happening now")
-
     def log_activity(self, message: str):
-        self.activity_entries.append(message)
-        self.activity_entries = self.activity_entries[-10:]
-        self.activity_log.setText("\n".join(self.activity_entries))
+        log_info(message)
 
     def set_status(self, text: str):
         if not text:
@@ -724,7 +710,7 @@ class RenamerGUI(QWidget):
         self.set_status(status)
         self.progress_bar.setRange(0, 0)
         self.spinner_timer.start(300)
-        for btn in (self.play_button, self.btn_process, self.btn_all, self.btn_next):
+        for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(True)
 
     def stop_processing_ui(self, status: str = "Idle"):
@@ -733,7 +719,7 @@ class RenamerGUI(QWidget):
         self.progress_bar.setValue(0)
         self.spinner_timer.stop()
         self.spinner_label.setText("")
-        for btn in (self.play_button, self.btn_process, self.btn_all, self.btn_next):
+        for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(False)
 
     def check_ollama_status(self):
@@ -949,6 +935,7 @@ class RenamerGUI(QWidget):
             self.stop_and_reprocess()
             return
         if not self.pdf_files:
+            log_info("Generate clicked with no files queued")
             show_friendly_error(
                 self,
                 "No files queued",
@@ -961,19 +948,15 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
         self.failed_indices.clear()
         self.processing_enabled = True
+        log_info(
+            f"Starting generation for {len(self.pdf_files)} files using backend {self.get_ai_backend()}"
+        )
         self.start_processing_ui("Generating proposals…")
         self.start_parallel_processing()
 
-    def next_file(self):
-        if not self.pdf_files or not self.processing_enabled:
-            return
-
-        next_index = (self.current_index + 1) % len(self.pdf_files)
-        self.current_index = next_index
-        self.process_current_file()
-
     def stop_and_reprocess(self):
         self.stop_event.set()
+        log_info("Stopping current processing and resetting state")
 
         for worker in list(self.active_workers.values()):
             worker.requestInterruption()
@@ -1138,9 +1121,12 @@ class RenamerGUI(QWidget):
         self.file_results[index] = result
         self.apply_cached_result(index, result)
         self.start_parallel_processing()
-        self.log_activity(f"✓ Processed file {index + 1} of {len(self.pdf_files)}")
+        self.log_activity(
+            f"✓ Processed file {index + 1} of {len(self.pdf_files)} (chars: {result.get('char_count', 0)})"
+        )
         if not self.active_workers:
             self.stop_processing_ui("Idle")
+            log_info("All queued workers completed")
 
     def handle_worker_failed(self, index: int, error: Exception):
         self.active_workers.pop(index, None)
@@ -1148,6 +1134,7 @@ class RenamerGUI(QWidget):
             return
         self.failed_indices.add(index)
         log_exception(error)
+        log_info(f"Worker {index} failed: {error}")
         show_friendly_error(
             self,
             "Processing failed",
@@ -1251,17 +1238,23 @@ class RenamerGUI(QWidget):
         self.set_status(
             f"Running OCR ({options.ocr_pages} page(s) @ {options.ocr_dpi} DPI) for file {index + 1}…"
         )
-        self.log_activity(f"→ Processing file {index + 1}")
+        self.log_activity(
+            f"→ Processing file {index + 1} with backend {self.get_ai_backend()}"
+        )
         worker.start()
 
     def start_parallel_processing(self):
         if not self.processing_enabled:
+            log_info("Parallel processing skipped: disabled state")
             return
         if self.stop_event.is_set():
+            log_info("Parallel processing halted due to stop event")
             return
         if not self.pdf_files:
+            log_info("Parallel processing skipped: no files loaded")
             return
 
+        started_any = False
         for idx in range(len(self.pdf_files)):
             if len(self.active_workers) >= self.max_parallel_workers:
                 break
@@ -1269,6 +1262,11 @@ class RenamerGUI(QWidget):
                 continue
             pdf_path = os.path.join(self.input_edit.text(), self.pdf_files[idx])
             self.start_worker_for_index(idx, pdf_path)
+            started_any = True
+
+        if not started_any and not self.active_workers:
+            log_info("No workers started; marking UI idle")
+            self.stop_processing_ui("Idle")
 
 # ==========================================================
 # MAIN
