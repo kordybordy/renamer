@@ -232,6 +232,30 @@ def configure_tesseract() -> str:
 
 TESSDATA_DIR = configure_tesseract()
 
+# ==========================================================
+# AI SYSTEM PROMPT — returns structured JSON
+# ==========================================================
+
+SYSTEM_PROMPT = """
+Return strict JSON in this exact shape:
+
+{
+  "plaintiff": ["Name Surname", ...],
+  "defendant": ["Name Surname", ...],
+  "case_numbers": ["I C 1234/25", ...],
+  "letter_type": "Pozew" | "Kontrpozew" | "Pozew + Postanowienie" |
+                  "Postanowienie" | "Portal" | "Korespondencja" |
+                  "Unknown"
+}
+
+Rules:
+- Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
+- Extract ALL case numbers.
+- Preserve Polish letters.
+- Infer letter type according to content.
+- No commentary. Output JSON only.
+"""
+
 
 @dataclass
 class NamingOptions:
@@ -346,6 +370,120 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
         return text
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def call_openai_model(text: str) -> str:
+    """Call OpenAI with fallback models, returning the raw content."""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        log_info("OpenAI gpt-5-nano failed; retrying with gpt-4.1-mini")
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+    )
+    return resp.choices[0].message.content
+
+
+def call_ollama_model(text: str) -> str:
+    """Call a local Ollama model using the same system prompt."""
+
+    try:
+        payload = {
+            "model": "llama3",
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            "stream": False,
+        }
+        url = urljoin(OLLAMA_HOST, "/api/chat")
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        body = resp.json()
+        message = body.get("message", {})
+        return message.get("content", "")
+    except Exception as e:
+        log_exception(e)
+        return ""
+
+
+def parse_ai_metadata(raw: str) -> dict:
+    """Convert AI JSON into the meta structure expected by the app."""
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+
+    meta: dict[str, str] = {}
+
+    def prepare_party(key: str):
+        values = data.get(key)
+        if not isinstance(values, list):
+            return
+        cleaned: list[str] = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            name = clean_party_name(value)
+            if not name:
+                continue
+            if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in name.lower():
+                continue
+            cleaned.append(name)
+        max_items = FILENAME_RULES.get("max_parties", len(cleaned))
+        if cleaned:
+            meta[key] = ", ".join(cleaned[:max_items])
+
+    prepare_party("plaintiff")
+    prepare_party("defendant")
+
+    lt = data.get("letter_type")
+    if isinstance(lt, str) and lt.strip():
+        meta["letter_type"] = lt.strip()
+
+    return meta
+
+
+def extract_metadata_ai(ocr_text: str, backend: str) -> dict:
+    """Use AI backend to extract metadata; returns empty dict on failure."""
+
+    if not ocr_text.strip():
+        return {}
+
+    backends = [backend]
+    if backend == "auto":
+        backends = ["ollama", "openai"]
+
+    for target in backends:
+        try:
+            if target == "ollama":
+                raw = call_ollama_model(ocr_text)
+            else:
+                raw = call_openai_model(ocr_text)
+            meta = parse_ai_metadata(raw)
+            if meta:
+                log_info(f"AI metadata extracted using {target}")
+                return meta
+        except Exception as e:
+            log_exception(e)
+            continue
+
+    return {}
 
 
 def requirements_from_template(template: list[str]) -> dict:
@@ -470,7 +608,8 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            meta = extract_metadata(ocr_text, self.requirements) if ocr_text else {}
+            ai_meta = extract_metadata_ai(ocr_text, self.backend)
+            meta = ai_meta or (extract_metadata(ocr_text, self.requirements) if ocr_text else {})
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
             ]
@@ -1322,7 +1461,8 @@ class RenamerGUI(QWidget):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        meta = extract_metadata(ocr_text, requirements) if ocr_text else {}
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend())
+        meta = ai_meta or (extract_metadata(ocr_text, requirements) if ocr_text else {})
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
 
