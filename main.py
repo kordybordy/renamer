@@ -369,31 +369,66 @@ class FileProcessWorker(QThread):
     finished = pyqtSignal(int, dict)
     failed = pyqtSignal(int, Exception)
 
-    def __init__(self, index: int, pdf_path: str, options: NamingOptions, stop_event: threading.Event):
+    def __init__(
+        self,
+        index: int,
+        pdf_path: str,
+        options: NamingOptions,
+        stop_event: threading.Event,
+        backend: str,
+    ):
         super().__init__()
         self.index = index
         self.pdf_path = pdf_path
         self.options = options
         self.stop_event = stop_event
+        self.backend = backend
         self.requirements = requirements_from_template(options.template_elements)
 
     def run(self):
         try:
             if self.stop_event.is_set():
                 return
+            log_info(
+                f"[Worker {self.index + 1}] Starting OCR for '{os.path.basename(self.pdf_path)}' "
+                f"(pages={self.options.ocr_pages}, dpi={self.options.ocr_dpi}, "
+                f"char_limit={self.options.ocr_char_limit}, backend={self.backend})"
+            )
             ocr_text = extract_text_ocr(
                 self.pdf_path,
                 self.options.ocr_char_limit,
                 self.options.ocr_dpi,
                 self.options.ocr_pages,
             ) if self.options.ocr_enabled else ""
+            char_count = len(ocr_text)
+            if char_count:
+                log_info(f"[Worker {self.index + 1}] OCR extracted {char_count} characters")
+            else:
+                log_info(
+                    f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
+                )
             meta = extract_metadata(ocr_text, self.requirements) if ocr_text else {}
+            defaults_applied = [
+                key for key in self.requirements if key not in meta or not meta.get(key)
+            ]
             meta = apply_meta_defaults(meta, self.requirements)
+
+            if defaults_applied:
+                log_info(
+                    f"[Worker {self.index + 1}] Applied defaults for missing fields: {', '.join(defaults_applied)}"
+                )
+            log_info(
+                f"[Worker {self.index + 1}] Extracted meta: {json.dumps(meta, ensure_ascii=False)}"
+            )
 
             if self.stop_event.is_set():
                 return
 
             filename = build_filename(meta, self.options)
+
+            log_info(
+                f"[Worker {self.index + 1}] Proposed filename: {filename} (backend={self.backend})"
+            )
 
             self.finished.emit(
                 self.index,
@@ -1188,6 +1223,10 @@ class RenamerGUI(QWidget):
         AI_BACKEND = self.get_ai_backend()
         options = self.build_options()
         requirements = requirements_from_template(options.template_elements)
+        self.log_activity(
+            f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
+            f"char_limit={options.ocr_char_limit}, backend={AI_BACKEND})"
+        )
         ocr_text = extract_text_ocr(
             pdf_path,
             options.ocr_char_limit,
@@ -1195,10 +1234,26 @@ class RenamerGUI(QWidget):
             options.ocr_pages,
         ) if options.ocr_enabled else ""
 
+        char_count = len(ocr_text)
+        self.log_activity(f"[UI] OCR extracted {char_count} characters for '{pdf}'")
+        if char_count == 0:
+            self.log_activity(
+                f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
+            )
+
         meta = extract_metadata(ocr_text, requirements) if ocr_text else {}
+        defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
 
+        if defaults_applied:
+            self.log_activity(
+                f"[UI] Applied defaults for missing fields: {', '.join(defaults_applied)}"
+            )
+        self.log_activity(f"[UI] Extracted meta: {json.dumps(meta, ensure_ascii=False)}")
+
         filename = build_filename(meta, options)
+
+        self.log_activity(f"[UI] Proposed filename: {filename} (backend={AI_BACKEND})")
 
         return {
             "ocr_text": ocr_text,
@@ -1247,6 +1302,7 @@ class RenamerGUI(QWidget):
             pdf_path=pdf_path,
             options=options,
             stop_event=self.stop_event,
+            backend=self.get_ai_backend(),
         )
         worker.finished.connect(self.handle_worker_finished)
         worker.failed.connect(self.handle_worker_failed)
