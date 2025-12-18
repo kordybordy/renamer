@@ -684,6 +684,11 @@ class RenamerGUI(QWidget):
             for element in saved_template:
                 self.add_template_item(element)
 
+        # Automatically reload PDFs from the last used folder if it still exists.
+        saved_input = self.input_edit.text()
+        if saved_input and os.path.isdir(saved_input):
+            self.load_pdfs()
+
     def save_settings(self):
         self.settings.setValue("input_folder", self.input_edit.text())
         self.settings.setValue("output_folder", self.output_edit.text())
