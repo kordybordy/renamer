@@ -44,8 +44,9 @@ client = OpenAI(api_key=API_KEY)
 
 FILENAME_RULES = {
     "remove_raiffeisen": True,        # always remove Raiffeisen from parties
-    "max_parties": 3,                 # limit number of names in filename
+    "max_parties": 5,                 # limit number of names in filename
     "primary_party_only": True,       # keep only the first detected party per side
+    "person_token_limit": 2,          # keep only first two tokens for a single party entry
     "surname_first": True,            # SURNAME Name
     "use_commas": True,               # comma-separated parties
     "replace_slash_only": True,       # only replace "/" → "_"
@@ -286,7 +287,7 @@ Return strict JSON in this exact shape:
 Rules:
 - Identify all parties. If Raiffeisen or DWF Jamka Poland appears, the opposing side is the relevant one.
 - DWF Poland Jamka or Raiifeisen Bank is never a plaintiff or defendant; ignore them in party lists.
-- If multiple people appear for the same side, return ONLY the first full name and ignore the rest.
+- If multiple people appear for the same side, return ONLY the first full name and ignore the rest. Do not return two full people in one string; keep only the first person.
 - Never include PESEL, address or similar personal identifiers inside party names.
 - Extract ALL case numbers.
 - Preserve Polish letters.
@@ -334,6 +335,11 @@ def clean_party_name(raw: str) -> str:
     name = re.sub(r"\b\d{11}\b", "", name)
     name = re.sub(r"\s{2,}", " ", name)
     name = name.strip()
+    max_tokens = FILENAME_RULES.get("person_token_limit")
+    if max_tokens and max_tokens > 0:
+        tokens = name.split()
+        if len(tokens) > max_tokens:
+            name = " ".join(tokens[:max_tokens])
     return name[:80]
 
 
