@@ -6,10 +6,9 @@
 /* ---------------- GLOBAL RESET ---------------- */
 
 * {
-    font-family: "Consolas", "Lucida Console", "Courier New", monospace;
-    font-size: 11px;
-    color: #00FF66;
-    outline: none;
+    font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+    font-size: 10pt;
+    color: #d0d0d0;
 }
 
 QWidget {
@@ -23,25 +22,31 @@ QMainWindow {
     border: 3px solid #00FF66;
 }
 
-/* ---------------- LEFT NAV / MODES ---------------- */
-
-QListWidget {
-    background-color: #020202;
-    border-right: 3px solid #00FF66;
-    padding: 4px;
+/* ============================= */
+/* HEADERS / LABELS              */
+/* ============================= */
+QLabel#Title {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #7aa2f7;
+    letter-spacing: 1px;
 }
 
-QListWidget::item {
-    padding: 10px;
-    margin-bottom: 6px;
-    border: 2px solid #00331A;
-    background-color: #050505;
+QLabel#Subtitle {
+    font-size: 9pt;
+    color: #9aa0a7;
 }
 
-QListWidget::item:selected {
-    background-color: #00331A;
-    border: 2px solid #00FF66;
-    color: #00FF66;
+/* ============================= */
+/* MODE BAR                      */
+/* ============================= */
+QPushButton#ModeButton {
+    background: #0b0b0f;
+    border: 1px solid #3a3a44;
+    padding: 6px 12px;
+    font-weight: 600;
+    color: #c4c4cc;
+    border-radius: 0;
 }
 
 QListWidget::item:hover {
@@ -61,52 +66,18 @@ QLabel#TitleLabel {
 /* ---------------- GROUP BOXES ---------------- */
 
 QGroupBox {
-    border: 2px dashed #00FF66;
-    margin-top: 16px;
-    padding: 10px;
+    border: 1px solid #3a3a44;
+    margin-top: 8px;
+    padding: 6px;
+    background: #111118;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 6px;
-    background-color: #000000;
-    color: #00FF66;
-}
-
-/* ---------------- INPUTS ---------------- */
-
-QLineEdit,
-QSpinBox,
-QComboBox {
-    background-color: #000000;
-    border: 2px solid #006633;
-    padding: 6px;
-    selection-background-color: #00FF66;
-    selection-color: #000000;
-}
-
-QLineEdit:focus,
-QSpinBox:focus,
-QComboBox:focus {
-    border: 2px solid #00FF66;
-    background-color: #001A0D;
-}
-
-/* ---------------- TEXT AREAS ---------------- */
-
-QTextEdit,
-QPlainTextEdit {
-    background-color: #000000;
-    border: 2px solid #006633;
-    padding: 8px;
-    color: #00FF66;
-}
-
-QPlainTextEdit#StatusLog {
-    background-color: #000000;
-    border: 2px solid #00FF66;
-    color: #00FF66;
+    left: 8px;
+    padding: 0 4px;
+    background: #0e0e11;
+    color: #7aa2f7;
 }
 
 /* ---------------- TABLES ---------------- */
@@ -117,26 +88,29 @@ QTableWidget {
     border: 2px solid #00FF66;
 }
 
-QHeaderView::section {
-    background-color: #001A0D;
-    border: 2px solid #00331A;
-    padding: 6px;
-    color: #00FF66;
+/* ============================= */
+/* INPUTS                        */
+/* ============================= */
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
+    background-color: #0b0b0f;
+    border: 1px solid #444;
+    padding: 5px;
+    border-radius: 0;
+    selection-background-color: #7aa2f7;
 }
 
-QTableWidget::item:selected {
-    background-color: #00331A;
-    color: #00FF66;
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+    border: 1px solid #7aa2f7;
 }
 
 /* ---------------- BUTTONS ---------------- */
 
 QPushButton {
-    background-color: #001A0D;
-    border: 2px solid #00FF66;
-    padding: 8px 16px;
-    min-height: 30px;
-    color: #00FF66;
+    background: #1a1a22;
+    border: 1px solid #5a5a66;
+    padding: 6px 10px;
+    color: #d0d0d0;
+    border-radius: 0;
 }
 
 QPushButton:hover {
@@ -148,55 +122,39 @@ QPushButton:pressed {
     border: 2px solid #FFFFFF;
 }
 
-/* Primary (Execute / Run) */
-QPushButton#PrimaryButton {
-    background-color: #00331A;
-    border: 3px solid #00FF66;
-    font-weight: bold;
+QPushButton#Primary {
+    background: #2c2c3a;
+    border-color: #7aa2f7;
+    color: #7aa2f7;
+    font-weight: 600;
 }
 
-/* Danger */
-QPushButton#DangerButton {
-    background-color: #330000;
-    border: 3px solid #FF3333;
-    color: #FF3333;
+/* ============================= */
+/* TABLES / LISTS                */
+/* ============================= */
+QTableWidget {
+    background-color: #0b0b0f;
+    gridline-color: #333;
+    border: 1px solid #444;
 }
 
-/* ---------------- CHECKBOXES ---------------- */
-
-QCheckBox {
-    spacing: 8px;
+QHeaderView::section {
+    background-color: #1a1a22;
+    border: 1px solid #3a3a44;
+    padding: 5px;
 }
 
-QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
-    border: 2px solid #00FF66;
-    background-color: #000000;
-}
-
-QCheckBox::indicator:checked {
-    background-color: #00FF66;
-}
-
-/* ---------------- PROGRESS BAR ---------------- */
-
-QProgressBar {
-    border: 2px solid #00FF66;
-    background-color: #000000;
-    height: 14px;
-}
-
-QProgressBar::chunk {
-    background-color: #00FF66;
+QListWidget, QListView {
+    background: #0b0b0f;
+    border: 1px solid #3a3a44;
 }
 
 /* ---------------- STATUS BAR ---------------- */
 
 QStatusBar {
-    background-color: #000000;
-    border-top: 2px solid #00FF66;
-    color: #00FF66;
+    background-color: #0b0b0f;
+    border-top: 1px solid #3a3a44;
+    color: #9aa0a7;
 }
 
 /* ---------------- TOOLTIP ---------------- */
