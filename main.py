@@ -286,6 +286,7 @@ Return strict JSON in this exact shape:
 Rules:
 - Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
 - DWF Poland Jamka is never a plaintiff or defendant; ignore them in party lists.
+- Never include PESEL or similar personal identifiers inside party names.
 - Extract ALL case numbers.
 - Preserve Polish letters.
 - Infer letter type according to content.
@@ -309,7 +310,6 @@ def clean_party_name(raw: str) -> str:
     """Normalize party names extracted from OCR text while stripping address tails."""
 
     name = raw.strip().strip("-:;•")
-    name = re.sub(r"\s{2,}", " ", name)
     name = re.sub(r"^[\d.\)]+\s*", "", name)
 
     # Remove obvious address fragments that often trail an entity name
@@ -326,7 +326,13 @@ def clean_party_name(raw: str) -> str:
         if match:
             name = name[: match.start()].rstrip(",; -")
             break
-
+    name = re.sub(r"\(\s*z domu[^)]*\)", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"(?i)\bz domu\b.*", "", name)
+    name = name.replace("(", "").replace(")", "")
+    name = re.sub(r"(?i)\bpesel[:\s]*\d[\d\s]{9,}\d\b", "", name)
+    name = re.sub(r"\b\d{11}\b", "", name)
+    name = re.sub(r"\s{2,}", " ", name)
+    name = name.strip()
     return name[:80]
 
 
@@ -922,6 +928,15 @@ class RenamerGUI(QWidget):
         h2.addWidget(btn_output)
         self.main_layout.addLayout(h2)
 
+        play_row = QHBoxLayout()
+        self.play_button = QPushButton("▶ Generate")
+        self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
+        self.play_button.clicked.connect(self.start_processing_clicked)
+        play_row.addStretch()
+        play_row.addWidget(self.play_button)
+        play_row.addStretch()
+        self.main_layout.addLayout(play_row)
+
         # OCR options
         h3b = QHBoxLayout()
         self.run_ocr_checkbox = QCheckBox("Run OCR")
@@ -1076,15 +1091,6 @@ class RenamerGUI(QWidget):
         self.ocr_preview.setMinimumHeight(140)
         self.main_layout.addWidget(self.ocr_preview_label)
         self.main_layout.addWidget(self.ocr_preview)
-
-        play_row = QHBoxLayout()
-        self.play_button = QPushButton("▶ Generate")
-        self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
-        self.play_button.clicked.connect(self.start_processing_clicked)
-        play_row.addStretch()
-        play_row.addWidget(self.play_button)
-        play_row.addStretch()
-        self.main_layout.addLayout(play_row)
 
         # Buttons row
         h5 = QHBoxLayout()
