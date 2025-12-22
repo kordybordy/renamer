@@ -274,23 +274,25 @@ SYSTEM_PROMPT = """
 Return strict JSON in this exact shape:
 
 {
-  "plaintiff": ["Name Surname", ...],
-  "defendant": ["Name Surname", ...],
+  "plaintiff": ["Given Surname", ...],
+  "defendant": ["Given Surname", ...],
   "case_numbers": ["I C 1234/25", ...],
   "letter_type": "Pozew" | "Pozew + Postanowienie" |
-                  "Postanowienie" | "Portal" | "Korespondencja" |
-                  "Unknown" | "Zawiadomienie" |
-                  "Odpowiedź na pozew" | "Wniosek" | "Replika" |
+                 "Postanowienie" | "Portal" | "Korespondencja" |
+                 "Unknown" | "Zawiadomienie" |
+                 "Odpowiedź na pozew" | "Wniosek" | "Replika"
 }
 
 Rules:
-- Identify all parties. 
-- DWF Poland Jamka or Raiifeisen Bank is never a plaintiff or defendant; ignore them in party lists.
-- Include every party on each side. Each list item must contain exactly one person or entity written as \"Given Surname\" (one given name and one surname). Do not merge multiple people into one string.
-- Never include PESEL, address or similar personal identifiers inside party names.
+- Ignore DWF Poland Jamka and Raiffeisen Bank (do not include them in any party list).
+- Each list item MUST be EXACTLY TWO WORDS: "Given Surname".
+  If the person has multiple given names, KEEP ONLY THE FIRST given name.
+  Examples:
+    "Szymon Hubert Marciniak" -> "Szymon Marciniak"
+    "Katarzyna Magdalena Obałek" -> "Katarzyna Obałek"
+- Never include PESEL, addresses, or IDs.
 - Extract ALL case numbers.
 - Preserve Polish letters.
-- Infer letter type according to content.
 - No commentary. Output JSON only.
 """
 
@@ -305,6 +307,72 @@ class NamingOptions:
     plaintiff_surname_first: bool
     defendant_surname_first: bool
     turbo_mode: bool
+
+
+def normalize_person_to_given_surname(s: str) -> str:
+    """
+    Returns 'Given Surname' (exactly 2 tokens), dropping middle names.
+    Handles common OCR noise and hyphenated surnames.
+    """
+    if not s:
+        return ""
+
+    # Trim + collapse whitespace
+    s = re.sub(r"\s+", " ", s.strip())
+
+    # Remove trailing commas/periods
+    s = s.strip(" ,.;:")
+
+    parts = s.split(" ")
+    if len(parts) == 1:
+        return s
+
+    # If AI accidentally returns "SURNAME Given ..." (common when OCR shows all-caps surname first)
+    # Heuristic: first token ALL CAPS (incl Polish), and later tokens not all-caps -> treat first as surname.
+    first = parts[0]
+    rest = parts[1:]
+    is_all_caps = (first.upper() == first) and any(ch.isalpha() for ch in first)
+
+    if is_all_caps and len(parts) >= 2:
+        surname = first.title()
+        given = rest[0].title()
+        return f"{given} {surname}"
+
+    if len(parts) == 2:
+        likely_surname_first_suffixes = (
+            "ski",
+            "ska",
+            "cki",
+            "cka",
+            "dzki",
+            "dzka",
+            "wicz",
+            "owicz",
+            "ewicz",
+            "icz",
+            "czyk",
+            "czak",
+            "czuk",
+            "uk",
+            "ak",
+            "ek",
+            "arz",
+            "asz",
+            "ysz",
+            "ów",
+            "owa",
+            "ewna",
+        )
+        first_lower = first.lower()
+        if first_lower.endswith(likely_surname_first_suffixes):
+            surname = first.title()
+            given = rest[0].title()
+            return f"{given} {surname}"
+
+    # Default: treat first as given, last as surname, drop middle names
+    given = parts[0].title()
+    surname = parts[-1].title()
+    return f"{given} {surname}"
 
 
 def clean_party_name(raw: str) -> str:
@@ -347,19 +415,16 @@ def clean_party_name(raw: str) -> str:
 
 
 def format_party_name(name: str, surname_first: bool) -> str:
-    tokens = [tok for tok in name.split() if tok]
-    if len(tokens) < 2:
-        return name
+    normalized = normalize_person_to_given_surname(name) or name
+    tokens = [tok for tok in normalized.split() if tok]
+    if len(tokens) != 2:
+        return normalized
 
     joined = " ".join(tokens)
     if re.search(r"[\d/]", joined) or "." in joined:
-        return name
+        return normalized
 
-    given = " ".join(tokens[:-1]).strip()
-    surname = tokens[-1].strip()
-    if not given or not surname:
-        return name
-
+    given, surname = tokens
     if surname_first:
         return f"{surname} {given}".strip()
     return f"{given} {surname}".strip()
@@ -547,9 +612,12 @@ def parse_ai_metadata(raw: str) -> dict:
             if not isinstance(value, str):
                 continue
             name = clean_party_name(value)
+            name = normalize_person_to_given_surname(name) or name
             if not name:
                 continue
             lower_name = name.lower()
+            if "dwf poland jamka" in lower_name:
+                continue
             if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in lower_name:
                 continue
             cleaned.append(name)
