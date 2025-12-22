@@ -338,6 +338,37 @@ def normalize_person_to_given_surname(s: str) -> str:
         given = rest[0].title()
         return f"{given} {surname}"
 
+    if len(parts) == 2:
+        likely_surname_first_suffixes = (
+            "ski",
+            "ska",
+            "cki",
+            "cka",
+            "dzki",
+            "dzka",
+            "wicz",
+            "owicz",
+            "ewicz",
+            "icz",
+            "czyk",
+            "czak",
+            "czuk",
+            "uk",
+            "ak",
+            "ek",
+            "arz",
+            "asz",
+            "ysz",
+            "ów",
+            "owa",
+            "ewna",
+        )
+        first_lower = first.lower()
+        if first_lower.endswith(likely_surname_first_suffixes):
+            surname = first.title()
+            given = rest[0].title()
+            return f"{given} {surname}"
+
     # Default: treat first as given, last as surname, drop middle names
     given = parts[0].title()
     surname = parts[-1].title()
@@ -384,13 +415,14 @@ def clean_party_name(raw: str) -> str:
 
 
 def format_party_name(name: str, surname_first: bool) -> str:
-    tokens = [tok for tok in name.split() if tok]
+    normalized = normalize_person_to_given_surname(name) or name
+    tokens = [tok for tok in normalized.split() if tok]
     if len(tokens) != 2:
-        return name
+        return normalized
 
     joined = " ".join(tokens)
     if re.search(r"[\d/]", joined) or "." in joined:
-        return name
+        return normalized
 
     given, surname = tokens
     if surname_first:
