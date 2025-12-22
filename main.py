@@ -44,7 +44,8 @@ client = OpenAI(api_key=API_KEY)
 
 FILENAME_RULES = {
     "remove_raiffeisen": True,        # always remove Raiffeisen from parties
-    "max_parties": 3,                 # limit number of names in filename
+    "max_parties": 10,                # limit number of names in filename
+    "primary_party_only": False,      # include all detected parties per side
     "surname_first": True,            # SURNAME Name
     "use_commas": True,               # comma-separated parties
     "replace_slash_only": True,       # only replace "/" → "_"
@@ -285,6 +286,7 @@ Return strict JSON in this exact shape:
 Rules:
 - Identify all parties. If Raiffeisen or DWF Jamka Poland appears, the opposing side is the relevant one.
 - DWF Poland Jamka or Raiifeisen Bank is never a plaintiff or defendant; ignore them in party lists.
+- Include every party on each side. Each list item must contain exactly one person or entity written as \"Given Surname\" (one given name and one surname). Do not merge multiple people into one string.
 - Never include PESEL, address or similar personal identifiers inside party names.
 - Extract ALL case numbers.
 - Preserve Polish letters.
@@ -542,6 +544,8 @@ def parse_ai_metadata(raw: str) -> dict:
             if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in lower_name:
                 continue
             cleaned.append(name)
+        if FILENAME_RULES.get("primary_party_only"):
+            cleaned = cleaned[:1]
         max_items = FILENAME_RULES.get("max_parties", len(cleaned))
         if cleaned:
             meta[key] = ", ".join(cleaned[:max_items])
