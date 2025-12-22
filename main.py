@@ -409,6 +409,37 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
+OCR_CACHE: Dict[str, dict] = {}
+OCR_CACHE_LOCK = threading.Lock()
+
+
+def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
+    normalized_pages = max(1, pages)
+    with OCR_CACHE_LOCK:
+        cached = OCR_CACHE.get(pdf_path)
+        if (
+            cached
+            and cached.get("dpi") == dpi
+            and cached.get("pages") == normalized_pages
+            and cached.get("char_limit", 0) >= char_limit
+        ):
+            cached_text = cached.get("ocr_text", "")[:char_limit]
+            log_info(
+                f"Reusing cached OCR for '{os.path.basename(pdf_path)}' "
+                f"(pages={normalized_pages}, dpi={dpi}, char_limit={char_limit})"
+            )
+            return cached_text
+    text = extract_text_ocr(pdf_path, char_limit, dpi, normalized_pages)
+    with OCR_CACHE_LOCK:
+        OCR_CACHE[pdf_path] = {
+            "ocr_text": text,
+            "char_limit": max(char_limit, len(text)),
+            "dpi": dpi,
+            "pages": normalized_pages,
+        }
+    return text
+
+
 def call_openai_model(text: str) -> str:
     """Call OpenAI with fallback models, returning the raw content."""
 
@@ -739,7 +770,7 @@ class FileProcessWorker(QThread):
                 f"(pages={self.options.ocr_pages}, dpi={self.options.ocr_dpi}, "
                 f"char_limit={self.options.ocr_char_limit}, backend={self.backend})"
             )
-            ocr_text = extract_text_ocr(
+            ocr_text = get_ocr_text(
                 self.pdf_path,
                 self.options.ocr_char_limit,
                 self.options.ocr_dpi,
@@ -1540,7 +1571,7 @@ class RenamerGUI(QWidget):
         ocr_text = ""
         try:
             if options.ocr_enabled:
-                ocr_text = extract_text_ocr(
+                ocr_text = get_ocr_text(
                     pdf_path,
                     options.ocr_char_limit,
                     options.ocr_dpi,
@@ -2018,7 +2049,7 @@ class RenamerGUI(QWidget):
             f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
             f"char_limit={options.ocr_char_limit}, backend={AI_BACKEND})"
         )
-        ocr_text = extract_text_ocr(
+        ocr_text = get_ocr_text(
             pdf_path,
             options.ocr_char_limit,
             options.ocr_dpi,
