@@ -793,6 +793,83 @@ class FileProcessWorker(QThread):
             self.failed.emit(self.index, e)
 
 
+class DistributionWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    log_ready = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, gui_ref, input_dir: str, pdf_files: List[str], case_index: List[CaseFolderInfo]):
+        super().__init__()
+        self.gui_ref = gui_ref
+        self.input_dir = input_dir
+        self.pdf_files = pdf_files
+        self.case_index = case_index
+
+    def run(self):
+        processed = 0
+        total = len(self.pdf_files)
+        try:
+            for pdf in self.pdf_files:
+                pdf_path = os.path.join(self.input_dir, pdf)
+                status_text = f"Processing {pdf}"
+                self.progress.emit(processed, total, status_text)
+                log_lines = [f"PDF: {pdf}"]
+                try:
+                    result = self.gui_ref.get_or_generate_distribution_result(pdf_path, pdf)
+                except Exception as e:
+                    log_exception(e)
+                    log_lines.append("Status: error while extracting defendants")
+                    self.log_ready.emit("\n".join(log_lines))
+                    processed += 1
+                    self.progress.emit(processed, total, f"{status_text} (error)")
+                    continue
+
+                defendants = self.gui_ref.get_defendants_from_result(result)
+                if defendants:
+                    log_lines.append(f"Defendants: {', '.join(defendants)}")
+                    primary_defendant = defendants[0]
+                else:
+                    log_lines.append("Defendants: none detected")
+                    primary_defendant = "—"
+
+                status_text = f"Processing {pdf} → {primary_defendant}"
+                matches: List[CaseFolderInfo] = []
+                if defendants:
+                    try:
+                        matches = self.gui_ref.distribution_manager.find_matches(defendants, self.case_index)
+                    except Exception as e:
+                        log_exception(e)
+
+                if matches:
+                    log_lines.append("Matched folders:")
+                    for match in matches:
+                        log_lines.append(f" - {os.path.basename(match.path)}")
+                    if len(matches) > 1:
+                        log_lines.append("Note: multiple matches detected, copied to all.")
+                    for match in matches:
+                        try:
+                            copied_name = self.gui_ref.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
+                            log_lines.append(
+                                f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
+                            )
+                        except Exception as e:
+                            log_exception(e)
+                            log_lines.append(
+                                f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
+                            )
+                else:
+                    log_lines.append("Status: no matching case folder found")
+
+                self.log_ready.emit("\n".join(log_lines))
+                processed += 1
+                self.progress.emit(processed, total, status_text)
+        except Exception as e:
+            log_exception(e)
+            self.log_ready.emit(f"Unexpected error during distribution: {e}")
+        finally:
+            self.finished.emit()
+
+
 class RenamerGUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -814,6 +891,7 @@ class RenamerGUI(QWidget):
         self.ui_ready = False
         self.distribution_manager = DistributionManager(normalize_polish)
         self.distribution_meta_cache: Dict[str, dict] = {}
+        self.distribution_worker: DistributionWorker | None = None
 
         # Widgets used across the UI
         self.preview_value = QLabel("—")
@@ -1349,6 +1427,26 @@ class RenamerGUI(QWidget):
             self.distribution_log_view.append(message)
             append_distribution_log(message)
 
+    def handle_distribution_progress(self, processed: int, total: int, status_text: str):
+        total = max(1, total)
+        processed = min(processed, total)
+        self.distribution_status_label.setText(status_text or "Processing…")
+        self.distribution_progress.setRange(0, total)
+        self.distribution_progress.setValue(processed)
+        self.distribution_progress.setFormat(f"{processed}/{total}")
+        self.distribution_progress.setTextVisible(True)
+
+    def handle_distribution_log(self, message: str):
+        self.append_distribution_log_message(message)
+
+    def handle_distribution_finished(self):
+        self.distribution_status_label.setText("Finished")
+        if self.distribution_progress.maximum() > 0:
+            self.distribution_progress.setValue(self.distribution_progress.maximum())
+        self.stop_distribution_ui("Finished")
+        QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
+        self.distribution_worker = None
+
     # ------------------------------------------------------
     # Load PDFs
     # ------------------------------------------------------
@@ -1467,6 +1565,16 @@ class RenamerGUI(QWidget):
         input_dir = self.distribution_input_edit.text() or self.input_edit.text()
         case_root = self.case_root_edit.text()
 
+        if self.distribution_worker and self.distribution_worker.isRunning():
+            show_friendly_error(
+                self,
+                "Distribution in progress",
+                "Please wait for the current distribution run to finish.",
+                "Distribution worker already running.",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
+
         if not os.path.isdir(input_dir):
             show_friendly_error(
                 self,
@@ -1522,66 +1630,11 @@ class RenamerGUI(QWidget):
 
         self.distribution_log_view.clear()
         self.start_distribution_ui(len(pdf_files))
-        processed = 0
-
-        for pdf in pdf_files:
-            pdf_path = os.path.join(input_dir, pdf)
-            log_lines = [f"PDF: {pdf}"]
-            try:
-                result = self.get_or_generate_distribution_result(pdf_path, pdf)
-            except Exception as e:
-                log_exception(e)
-                log_lines.append("Status: error while extracting defendants")
-                self.append_distribution_log_message("\n".join(log_lines))
-                processed += 1
-                self.distribution_progress.setValue(processed)
-                continue
-
-            defendants = self.get_defendants_from_result(result)
-            if defendants:
-                log_lines.append(f"Defendants: {', '.join(defendants)}")
-                primary_defendant = defendants[0]
-            else:
-                log_lines.append("Defendants: none detected")
-                primary_defendant = "—"
-
-            self.distribution_status_label.setText(f"Processing {pdf} → {primary_defendant}")
-
-            matches: List[CaseFolderInfo] = []
-            if defendants:
-                try:
-                    matches = self.distribution_manager.find_matches(defendants, case_index)
-                except Exception as e:
-                    log_exception(e)
-
-            if matches:
-                log_lines.append("Matched folders:")
-                for match in matches:
-                    log_lines.append(f" - {os.path.basename(match.path)}")
-                if len(matches) > 1:
-                    log_lines.append("Note: multiple matches detected, copied to all.")
-                for match in matches:
-                    try:
-                        copied_name = self.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
-                        log_lines.append(
-                            f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
-                        )
-                    except Exception as e:
-                        log_exception(e)
-                        log_lines.append(
-                            f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
-                        )
-            else:
-                log_lines.append("Status: no matching case folder found")
-
-            self.append_distribution_log_message("\n".join(log_lines))
-            processed += 1
-            self.distribution_progress.setValue(processed)
-
-        self.distribution_status_label.setText("Finished")
-        self.distribution_progress.setValue(len(pdf_files))
-        self.stop_distribution_ui("Idle")
-        QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
+        self.distribution_worker = DistributionWorker(self, input_dir, pdf_files, case_index)
+        self.distribution_worker.progress.connect(self.handle_distribution_progress)
+        self.distribution_worker.log_ready.connect(self.handle_distribution_log)
+        self.distribution_worker.finished.connect(self.handle_distribution_finished)
+        self.distribution_worker.start()
 
     def get_ai_backend(self) -> str:
         idx = self.backend_combo.currentIndex()
