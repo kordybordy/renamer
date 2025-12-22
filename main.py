@@ -934,12 +934,19 @@ class DistributionWorker(QThread):
                     self.progress.emit(processed, total, f"{status_text} (error)")
                     continue
 
+                raw_meta = result.get("raw_meta") or result.get("meta") or {}
+                log_lines.append(f"Raw defendant field value: {raw_meta.get('defendant')!r}")
                 defendants = self.gui_ref.get_defendants_from_result(result)
                 if defendants:
                     log_lines.append(f"Defendants: {', '.join(defendants)}")
                     primary_defendant = defendants[0]
+                    for defendant in defendants:
+                        tokens, surname = self.gui_ref.distribution_manager._defendant_tokens(defendant)
+                        log_lines.append(
+                            f"Normalized defendant '{defendant}': tokens={tokens}, surname={surname}"
+                        )
                 else:
-                    log_lines.append("Defendants: none detected")
+                    log_lines.append("Defendants: none detected (parsed list is empty)")
                     primary_defendant = "—"
 
                 status_text = f"Processing {pdf} → {primary_defendant}"
@@ -968,7 +975,14 @@ class DistributionWorker(QThread):
                                 f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
                             )
                 else:
-                    log_lines.append("Status: no matching case folder found")
+                    candidate_surnames = [
+                        self.gui_ref.distribution_manager._defendant_tokens(name)[1]
+                        for name in defendants
+                        if name
+                    ]
+                    log_lines.append(
+                        f"Status: no matching case folder found (checked {len(self.case_index)} folders; surnames tried={candidate_surnames})"
+                    )
 
                 self.log_ready.emit("\n".join(log_lines))
                 processed += 1
