@@ -52,6 +52,8 @@ FILENAME_RULES = {
     "default_letter_type": "pozew",   # fallback if AI unsure
 }
 
+BANNED_PARTY_KEYWORDS = ["dwf poland jamka"]
+
 
 DEFAULT_TEMPLATE_ELEMENTS = ["date", "plaintiff", "defendant", "letter_type"]
 
@@ -283,6 +285,7 @@ Return strict JSON in this exact shape:
 
 Rules:
 - Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
+- DWF Poland Jamka is never a plaintiff or defendant; ignore them in party lists.
 - Extract ALL case numbers.
 - Preserve Polish letters.
 - Infer letter type according to content.
@@ -490,7 +493,10 @@ def parse_ai_metadata(raw: str) -> dict:
             name = clean_party_name(value)
             if not name:
                 continue
-            if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in name.lower():
+            lower_name = name.lower()
+            if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in lower_name:
+                continue
+            if any(keyword in lower_name for keyword in BANNED_PARTY_KEYWORDS):
                 continue
             cleaned.append(name)
         max_items = FILENAME_RULES.get("max_parties", len(cleaned))
@@ -1386,7 +1392,10 @@ class RenamerGUI(QWidget):
             names = [str(item).strip() for item in value if str(item).strip()]
         cleaned: list[str] = []
         for name in names:
-            if name.lower() == "defendant":
+            lower_name = name.lower()
+            if lower_name == "defendant":
+                continue
+            if any(keyword in lower_name for keyword in BANNED_PARTY_KEYWORDS):
                 continue
             if name not in cleaned:
                 cleaned.append(name)
