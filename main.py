@@ -31,7 +31,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434/")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", urljoin(OLLAMA_HOST, "api/generate"))
 
 from openai import OpenAI
 client = OpenAI(api_key=API_KEY)
@@ -400,18 +401,16 @@ def call_ollama_model(text: str) -> str:
     try:
         payload = {
             "model": "qwen2.5:7b",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
+            "prompt": f"{SYSTEM_PROMPT}\n\n{text}",
             "stream": False,
         }
-        url = urljoin(OLLAMA_HOST, "/api/chat")
-        resp = requests.post(url, json=payload, timeout=120)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
         resp.raise_for_status()
         body = resp.json()
         message = body.get("message", {})
-        return message.get("content", "")
+        if message:
+            return message.get("content", "")
+        return body.get("response", "")
     except Exception as e:
         log_exception(e)
         return ""
