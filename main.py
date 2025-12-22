@@ -334,6 +334,15 @@ def clean_party_name(raw: str) -> str:
     name = re.sub(r"\b\d{11}\b", "", name)
     name = re.sub(r"\s{2,}", " ", name)
     name = name.strip()
+    max_tokens = FILENAME_RULES.get("person_token_limit")
+    if max_tokens and max_tokens > 0:
+        tokens = name.split()
+        if len(tokens) > max_tokens:
+            if max_tokens == 2 and len(tokens) >= 2:
+                # Preserve probable given + surname by keeping first and last tokens
+                name = " ".join([tokens[0], tokens[-1]])
+            else:
+                name = " ".join(tokens[:max_tokens])
     return name[:80]
 
 
