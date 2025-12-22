@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import glob
 import threading
+import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urljoin
@@ -881,9 +882,6 @@ class FileProcessWorker(QThread):
                 f"[Worker {self.index + 1}] Extracted meta: {json.dumps(meta, ensure_ascii=False)}"
             )
 
-            if self.stop_event.is_set():
-                return
-
             filename = build_filename(meta, self.options)
 
             log_info(
@@ -909,17 +907,26 @@ class DistributionWorker(QThread):
     log_ready = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, gui_ref, input_dir: str, pdf_files: List[str], case_index: List[CaseFolderInfo]):
+    def __init__(
+        self,
+        gui_ref,
+        input_dir: str,
+        pdf_files: List[str],
+        case_index: List[CaseFolderInfo],
+        csv_log_path: str | None = None,
+    ):
         super().__init__()
         self.gui_ref = gui_ref
         self.input_dir = input_dir
         self.pdf_files = pdf_files
         self.case_index = case_index
+        self.csv_log_path = csv_log_path
 
     def run(self):
         processed = 0
         total = len(self.pdf_files)
         try:
+            csv_entries: list[tuple[str, str, str]] = []
             for pdf in self.pdf_files:
                 pdf_path = os.path.join(self.input_dir, pdf)
                 status_text = f"Processing {pdf}"
@@ -967,6 +974,9 @@ class DistributionWorker(QThread):
                     for match in matches:
                         try:
                             copied_name = self.gui_ref.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
+                            csv_entries.append(
+                                (pdf, "copied", os.path.join(match.path, copied_name))
+                            )
                             log_lines.append(
                                 f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
                             )
@@ -974,6 +984,9 @@ class DistributionWorker(QThread):
                             log_exception(e)
                             log_lines.append(
                                 f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
+                            )
+                            csv_entries.append(
+                                (pdf, "copy_failed", f"{os.path.basename(match.path)}: {e}")
                             )
                 else:
                     candidate_surnames = [
@@ -984,10 +997,21 @@ class DistributionWorker(QThread):
                     log_lines.append(
                         f"Status: no matching case folder found (checked {len(self.case_index)} folders; surnames tried={candidate_surnames})"
                     )
+                    csv_entries.append((pdf, "no_match", ""))
 
                 self.log_ready.emit("\n".join(log_lines))
                 processed += 1
                 self.progress.emit(processed, total, status_text)
+            if self.csv_log_path:
+                try:
+                    os.makedirs(os.path.dirname(self.csv_log_path), exist_ok=True)
+                    with open(self.csv_log_path, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["file", "status", "target_or_error"])
+                        writer.writerows(csv_entries)
+                except Exception as e:
+                    log_exception(e)
+                    self.log_ready.emit(f"Failed to write CSV log: {e}")
         except Exception as e:
             log_exception(e)
             self.log_ready.emit(f"Unexpected error during distribution: {e}")
@@ -1017,6 +1041,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_manager = DistributionManager(normalize_polish)
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
+        self.distribution_csv_log: str | None = None
 
         # Widgets used across the UI
         self.preview_value = QLineEdit("—")
@@ -1036,8 +1061,13 @@ class RenamerGUI(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(8, 8, 8, 8)
         header_layout.setSpacing(8)
-        logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
-        pixmap = QPixmap(logo_path)
+        logo_path = None
+        for candidate in ("logo-32.png", "logo-square.png", "logo.png"):
+            candidate_path = os.path.join(BASE_DIR, "assets", candidate)
+            if os.path.exists(candidate_path):
+                logo_path = candidate_path
+                break
+        pixmap = QPixmap(logo_path) if logo_path else QPixmap()
         if not pixmap.isNull():
             logo_label = QLabel()
             logo_label.setPixmap(
@@ -1139,6 +1169,12 @@ class RenamerGUI(QMainWindow):
         self.play_button.setObjectName("Primary")
         self.play_button.clicked.connect(self.start_processing_clicked)
         action_layout.addWidget(self.play_button)
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.clicked.connect(self.stop_generation)
+        action_layout.addWidget(self.stop_button)
+        self.reset_button = QPushButton("RESET")
+        self.reset_button.clicked.connect(self.stop_and_reprocess)
+        action_layout.addWidget(self.reset_button)
         action_layout.addStretch()
         action_group.setLayout(action_layout)
         self.main_layout.addWidget(action_group)
@@ -1219,13 +1255,9 @@ class RenamerGUI(QMainWindow):
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
-        btn_quit = QPushButton("QUIT")
-        btn_quit.clicked.connect(self.close)
-
         bottom_layout.addWidget(btn_process)
         bottom_layout.addWidget(btn_all)
         bottom_layout.addStretch()
-        bottom_layout.addWidget(btn_quit)
         bottom_group.setLayout(bottom_layout)
         self.main_layout.addWidget(bottom_group)
 
@@ -1585,6 +1617,8 @@ class RenamerGUI(QMainWindow):
         self.append_status_message(f"[STATUS] {text}")
 
     def update_processing_progress(self, total: int = None, processed_override: int = None):
+        if self.stop_event.is_set() and not self.processing_enabled:
+            return
         total_files = total if total is not None else len(self.pdf_files)
         if total_files <= 0:
             total_files = 1
@@ -1735,6 +1769,8 @@ class RenamerGUI(QMainWindow):
             self.distribution_progress.setValue(self.distribution_progress.maximum())
         self.stop_distribution_ui("Finished")
         QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
+        if self.distribution_csv_log and os.path.exists(self.distribution_csv_log):
+            self.append_distribution_log_message(f"CSV log saved to: {self.distribution_csv_log}")
         self.distribution_worker = None
 
     # ------------------------------------------------------
@@ -1917,8 +1953,19 @@ class RenamerGUI(QMainWindow):
             return
 
         self.distribution_log_view.clear()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.distribution_csv_log = os.path.join(
+            input_dir, f"distribution_log_{timestamp}.csv"
+        )
+        self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
         self.start_distribution_ui(len(pdf_files))
-        self.distribution_worker = DistributionWorker(self, input_dir, pdf_files, case_index)
+        self.distribution_worker = DistributionWorker(
+            self,
+            input_dir,
+            pdf_files,
+            case_index,
+            csv_log_path=self.distribution_csv_log,
+        )
         self.distribution_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_worker.log_ready.connect(self.handle_distribution_log)
         self.distribution_worker.finished.connect(self.handle_distribution_finished)
@@ -2080,9 +2127,22 @@ class RenamerGUI(QMainWindow):
         self.start_processing_ui("Generating proposals…", total=len(self.pdf_files))
         self.start_parallel_processing()
 
+    def stop_generation(self):
+        if not self.processing_enabled and not self.active_workers:
+            self.append_status_message("[STOP] No active generation to stop.")
+            return
+        self.stop_event.set()
+        self.processing_enabled = False
+        for worker in list(self.active_workers.values()):
+            worker.requestInterruption()
+        self.set_status("Stopped • results kept")
+        self.append_status_message("[STOP] Halted new OCR/AI tasks; existing results preserved")
+        self.stop_processing_ui("Stopped")
+
     def stop_and_reprocess(self):
         self.stop_event.set()
         log_info("Stopping current processing and resetting state")
+        self.append_status_message("[RESET] Clearing OCR cache and filenames")
 
         for worker in list(self.active_workers.values()):
             worker.requestInterruption()
@@ -2247,36 +2307,37 @@ class RenamerGUI(QMainWindow):
     # Helpers
     def handle_worker_finished(self, index: int, result: dict):
         self.active_workers.pop(index, None)
-        if self.stop_event.is_set():
-            return
         self.file_results[index] = result
         self.apply_cached_result(index, result)
         self.update_processing_progress()
-        self.start_parallel_processing()
+        if not self.stop_event.is_set() and self.processing_enabled:
+            self.start_parallel_processing()
         self.log_activity(
             f"✓ Processed file {index + 1} of {len(self.pdf_files)} (chars: {result.get('char_count', 0)})"
         )
         if not self.active_workers:
-            self.stop_processing_ui("Idle")
-            log_info("All queued workers completed")
+            final_status = "Stopped" if self.stop_event.is_set() else "Idle"
+            self.stop_processing_ui(final_status)
+            log_info(f"All queued workers completed ({final_status})")
 
     def handle_worker_failed(self, index: int, error: Exception):
         self.active_workers.pop(index, None)
-        if self.stop_event.is_set():
-            return
         self.failed_indices.add(index)
         log_exception(error)
         log_info(f"Worker {index} failed: {error}")
-        show_friendly_error(
-            self,
-            "Processing failed",
-            "Renamer could not finish processing one of the files.",
-            traceback.format_exc(),
-        )
+        if not self.stop_event.is_set():
+            show_friendly_error(
+                self,
+                "Processing failed",
+                "Renamer could not finish processing one of the files.",
+                traceback.format_exc(),
+            )
         self.update_processing_progress()
-        self.start_parallel_processing()
+        if not self.stop_event.is_set() and self.processing_enabled:
+            self.start_parallel_processing()
         if not self.active_workers:
-            self.stop_processing_ui("Idle")
+            final_status = "Stopped" if self.stop_event.is_set() else "Idle"
+            self.stop_processing_ui(final_status)
 
     def on_row_selected(self, row: int, _col: int):
         self.current_index = row
@@ -2440,13 +2501,18 @@ if __name__ == "__main__":
             app.setStyleSheet(f.read())
     else:
         app.setStyleSheet(GLOBAL_STYLESHEET)
-    logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
-    icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
-    icon_file = icon_path if os.path.exists(icon_path) else logo_path
-    if os.path.exists(icon_file):
+    icon_candidates = [
+        os.path.join(BASE_DIR, "assets", "logo-256.png"),
+        os.path.join(BASE_DIR, "assets", "logo-64.png"),
+        os.path.join(BASE_DIR, "assets", "logo-32.png"),
+        os.path.join(BASE_DIR, "assets", "logo.ico"),
+        os.path.join(BASE_DIR, "assets", "logo.png"),
+    ]
+    icon_file = next((p for p in icon_candidates if os.path.exists(p)), None)
+    if icon_file and os.path.exists(icon_file):
         app.setWindowIcon(QIcon(icon_file))
     gui = RenamerGUI()
-    if os.path.exists(icon_file):
+    if icon_file and os.path.exists(icon_file):
         gui.setWindowIcon(QIcon(icon_file))
     gui.show()
     sys.exit(app.exec())
