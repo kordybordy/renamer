@@ -22,11 +22,11 @@ from PIL import Image
 import pytesseract
 
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QPushButton, QLabel, QLineEdit,
+    QApplication, QWidget, QMainWindow, QPushButton, QLabel, QLineEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
     QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QTabWidget, QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
-    QStatusBar, QAbstractItemView
+    QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
+    QStatusBar, QAbstractItemView, QStackedWidget, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
@@ -980,11 +980,11 @@ class DistributionWorker(QThread):
             self.finished.emit()
 
 
-class RenamerGUI(QWidget):
+class RenamerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Renamer")
-        self.setGeometry(200, 200, 1000, 760)
+        self.resize(1100, 780)
 
         self.settings = QSettings("Renamer", "Renamer")
 
@@ -1004,201 +1004,219 @@ class RenamerGUI(QWidget):
         self.distribution_worker: DistributionWorker | None = None
 
         # Widgets used across the UI
-        self.preview_value = QLabel("—")
-        self.preview_value.setStyleSheet("font-weight: 600;")
+        self.preview_value = QLineEdit("—")
+        self.preview_value.setReadOnly(True)
+        self.preview_value.setPlaceholderText("Preview generated filename")
+        self.preview_value.setMinimumHeight(32)
 
-        # ---------- Layout ----------
-        root_layout = QVBoxLayout()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
 
-        header = QHBoxLayout()
+        root_layout = QHBoxLayout()
+        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setSpacing(12)
+        central_widget.setLayout(root_layout)
+
+        self.sidebar = QListWidget()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(210)
+        self.sidebar.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for name in ("Main", "AI Filename Settings", "Distribute PDFs"):
+            QListWidgetItem(name, self.sidebar)
+        root_layout.addWidget(self.sidebar)
+
+        self.content_stack = QStackedWidget()
+        root_layout.addWidget(self.content_stack, 1)
+
+        self.main_page = QWidget()
+        self.settings_page = QWidget()
+        self.distribution_page = QWidget()
+        self.content_stack.addWidget(self.main_page)
+        self.content_stack.addWidget(self.settings_page)
+        self.content_stack.addWidget(self.distribution_page)
+        self.sidebar.currentRowChanged.connect(self.on_sidebar_changed)
+
+        # Main page (Page 0)
+        self.main_layout = QVBoxLayout()
+        self.main_layout.setSpacing(12)
+        self.main_page.setLayout(self.main_layout)
+
+        header_frame = QFrame()
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(12, 12, 12, 12)
         logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
         pixmap = QPixmap(logo_path)
         if not pixmap.isNull():
             logo_label = QLabel()
-            logo_label.setPixmap(pixmap.scaled(QSize(40, 40), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            header.addWidget(logo_label)
+            logo_label.setPixmap(
+                pixmap.scaled(QSize(48, 48), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+            header_layout.addWidget(logo_label)
         title_col = QVBoxLayout()
         title_label = QLabel("Renamer")
-        title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
+        title_label.setObjectName("Title")
         subtitle_label = QLabel("Smart document naming")
-        subtitle_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        subtitle_label.setObjectName("Subtitle")
         title_col.addWidget(title_label)
         title_col.addWidget(subtitle_label)
-        header.addLayout(title_col)
-        header.addStretch()
-        root_layout.addLayout(header)
+        header_layout.addLayout(title_col)
+        header_layout.addStretch()
+        header_frame.setLayout(header_layout)
+        self.main_layout.addWidget(header_frame)
 
-        self.tabs = QTabWidget()
-        self.main_tab = QWidget()
-        self.settings_tab = QWidget()
-        self.distribution_tab = QWidget()
-        self.tabs.addTab(self.main_tab, "Main")
-        self.tabs.addTab(self.settings_tab, "AI Filename Settings")
-        self.tabs.addTab(self.distribution_tab, "Distribute PDFs to Case Folders")
-        root_layout.addWidget(self.tabs)
-
-        self.main_layout = QVBoxLayout()
-        self.main_tab.setLayout(self.main_layout)
-        self.settings_layout = QVBoxLayout()
-        self.settings_tab.setLayout(self.settings_layout)
-        self.distribution_layout = QVBoxLayout()
-        self.distribution_tab.setLayout(self.distribution_layout)
-
-        # Distribution tab UI
-        dist_input_row = QHBoxLayout()
-        dist_input_row.addWidget(QLabel("Folder containing PDFs to distribute:"))
-        self.distribution_input_edit = QLineEdit()
-        dist_input_row.addWidget(self.distribution_input_edit)
-        self.distribution_input_button = QPushButton("Browse")
-        self.distribution_input_button.clicked.connect(self.choose_distribution_input)
-        dist_input_row.addWidget(self.distribution_input_button)
-        self.distribution_layout.addLayout(dist_input_row)
-
-        dist_cases_row = QHBoxLayout()
-        dist_cases_row.addWidget(QLabel("Case folders root:"))
-        self.case_root_edit = QLineEdit()
-        dist_cases_row.addWidget(self.case_root_edit)
-        self.case_root_button = QPushButton("Browse")
-        self.case_root_button.clicked.connect(self.choose_case_root)
-        dist_cases_row.addWidget(self.case_root_button)
-        self.distribution_layout.addLayout(dist_cases_row)
-
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode:"))
-        self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
-        self.copy_mode_checkbox.setChecked(True)
-        self.copy_mode_checkbox.setEnabled(False)
-        mode_row.addWidget(self.copy_mode_checkbox)
-        mode_row.addStretch()
-        self.distribution_layout.addLayout(mode_row)
-
-        dist_controls = QHBoxLayout()
-        self.distribution_status_label = QLabel("Idle")
-        dist_controls.addWidget(self.distribution_status_label)
-        dist_controls.addStretch()
-        self.distribution_progress = QProgressBar()
-        self.distribution_progress.setRange(0, 1)
-        self.distribution_progress.setValue(0)
-        self.distribution_progress.setTextVisible(True)
-        dist_controls.addWidget(self.distribution_progress)
-        self.distribute_button = QPushButton("Distribute")
-        self.distribute_button.clicked.connect(self.on_distribute_clicked)
-        dist_controls.addWidget(self.distribute_button)
-        self.distribution_layout.addLayout(dist_controls)
-
-        self.distribution_layout.addWidget(QLabel("Distribution log:"))
-        self.distribution_log_view = QTextEdit()
-        self.distribution_log_view.setReadOnly(True)
-        self.distribution_log_view.setPlaceholderText(
-            "Processing details will appear here. Copies are logged to disk as well."
-        )
-        self.distribution_log_view.setMinimumHeight(200)
-        self.distribution_layout.addWidget(self.distribution_log_view)
-
-        # Input folder
-        h1 = QHBoxLayout()
-        h1.addWidget(QLabel("Input folder:"))
+        io_frame = QFrame()
+        io_layout = QVBoxLayout()
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("Input folder:"))
         self.input_edit = QLineEdit()
-        h1.addWidget(self.input_edit)
+        input_row.addWidget(self.input_edit)
         btn_input = QPushButton("Browse")
         btn_input.clicked.connect(self.choose_input)
-        h1.addWidget(btn_input)
-        self.main_layout.addLayout(h1)
+        input_row.addWidget(btn_input)
+        io_layout.addLayout(input_row)
 
-        # Output folder
-        h2 = QHBoxLayout()
-        h2.addWidget(QLabel("Output folder:"))
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("Output folder:"))
         self.output_edit = QLineEdit()
-        h2.addWidget(self.output_edit)
+        output_row.addWidget(self.output_edit)
         btn_output = QPushButton("Browse")
         btn_output.clicked.connect(self.choose_output)
-        h2.addWidget(btn_output)
-        self.main_layout.addLayout(h2)
+        output_row.addWidget(btn_output)
+        io_layout.addLayout(output_row)
+        io_frame.setLayout(io_layout)
+        self.main_layout.addWidget(io_frame)
 
-        play_row = QHBoxLayout()
-        self.play_button = QPushButton("▶ Generate")
-        self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
+        action_frame = QFrame()
+        action_layout = QHBoxLayout()
+        action_layout.addStretch()
+        self.play_button = QPushButton("▶ Generate proposals")
+        self.play_button.setObjectName("Primary")
         self.play_button.clicked.connect(self.start_processing_clicked)
-        play_row.addStretch()
-        play_row.addWidget(self.play_button)
-        play_row.addStretch()
-        self.main_layout.addLayout(play_row)
+        action_layout.addWidget(self.play_button)
+        action_layout.addStretch()
+        action_frame.setLayout(action_layout)
+        self.main_layout.addWidget(action_frame)
 
-        # OCR options
-        h3b = QHBoxLayout()
+        table_frame = QFrame()
+        table_layout = QVBoxLayout()
+        table_layout.addWidget(QLabel("Files and proposed names:"))
+        self.file_table = QTableWidget(0, 2)
+        self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
+        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.file_table.verticalHeader().setVisible(False)
+        self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
+        self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
+        self.file_table.cellClicked.connect(self.on_row_selected)
+        table_layout.addWidget(self.file_table)
+        table_frame.setLayout(table_layout)
+        self.main_layout.addWidget(table_frame)
+
+        preview_frame = QFrame()
+        preview_layout = QVBoxLayout()
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Proposed filename:"))
+        self.filename_edit = QLineEdit()
+        self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
+        name_row.addWidget(self.filename_edit)
+        preview_layout.addLayout(name_row)
+
+        live_row = QHBoxLayout()
+        live_label = QLabel("Live preview:")
+        live_row.addWidget(live_label)
+        live_row.addWidget(self.preview_value)
+        preview_layout.addLayout(live_row)
+        preview_frame.setLayout(preview_layout)
+        self.main_layout.addWidget(preview_frame)
+
+        ocr_frame = QFrame()
+        ocr_layout = QVBoxLayout()
+        self.ocr_preview_label = QLabel("OCR text sent to AI:")
+        self.ocr_preview = QTextEdit()
+        self.ocr_preview.setReadOnly(True)
+        self.ocr_preview.setPlaceholderText(
+            "The OCR excerpt forwarded to the AI/backend will appear here."
+        )
+        self.ocr_preview.setMinimumHeight(140)
+        ocr_layout.addWidget(self.ocr_preview_label)
+        ocr_layout.addWidget(self.ocr_preview)
+        ocr_frame.setLayout(ocr_layout)
+        self.main_layout.addWidget(ocr_frame)
+
+        bottom_frame = QFrame()
+        bottom_layout = QHBoxLayout()
+        btn_process = QPushButton("✎ Rename File")
+        btn_process.clicked.connect(self.process_this_file)
+        self.btn_process = btn_process
+
+        btn_all = QPushButton("⏩ Rename All")
+        btn_all.clicked.connect(self.process_all_files_safe)
+        self.btn_all = btn_all
+
+        btn_quit = QPushButton("Quit")
+        btn_quit.clicked.connect(self.close)
+
+        bottom_layout.addWidget(btn_process)
+        bottom_layout.addWidget(btn_all)
+        bottom_layout.addWidget(btn_quit)
+        bottom_frame.setLayout(bottom_layout)
+        self.main_layout.addWidget(bottom_frame)
+
+        copyright_label = QLabel("Copyright 2025-2026 Przemek1337 all rights reserved")
+        copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.main_layout.addWidget(copyright_label)
+
+        # Settings page (Page 1)
+        self.settings_layout = QHBoxLayout()
+        self.settings_layout.setSpacing(12)
+        self.settings_page.setLayout(self.settings_layout)
+
+        controls_frame = QFrame()
+        controls_layout = QVBoxLayout()
+        controls_layout.setSpacing(10)
+
+        ocr_group = QFrame()
+        ocr_layout = QVBoxLayout()
         self.run_ocr_checkbox = QCheckBox("Run OCR")
         self.run_ocr_checkbox.setChecked(True)
         self.run_ocr_checkbox.toggled.connect(self.update_preview)
-        h3b.addWidget(self.run_ocr_checkbox)
+        ocr_layout.addWidget(self.run_ocr_checkbox)
 
-        h3b.addWidget(QLabel("Max characters:"))
+        char_row = QHBoxLayout()
+        char_row.addWidget(QLabel("Max characters:"))
         self.char_limit_spin = QSpinBox()
         self.char_limit_spin.setRange(100, 10000)
         self.char_limit_spin.setSingleStep(100)
         self.char_limit_spin.setValue(1500)
         self.char_limit_spin.valueChanged.connect(self.update_preview)
-        h3b.addWidget(self.char_limit_spin)
+        char_row.addWidget(self.char_limit_spin)
+        ocr_layout.addLayout(char_row)
 
-        h3b.addWidget(QLabel("OCR DPI:"))
+        dpi_row = QHBoxLayout()
+        dpi_row.addWidget(QLabel("OCR DPI:"))
         self.ocr_dpi_spin = QSpinBox()
         self.ocr_dpi_spin.setRange(72, 600)
         self.ocr_dpi_spin.setValue(300)
         self.ocr_dpi_spin.valueChanged.connect(self.update_preview)
-        h3b.addWidget(self.ocr_dpi_spin)
+        dpi_row.addWidget(self.ocr_dpi_spin)
+        ocr_layout.addLayout(dpi_row)
 
-        h3b.addWidget(QLabel("Pages to scan:"))
+        pages_row = QHBoxLayout()
+        pages_row.addWidget(QLabel("Pages to scan:"))
         self.ocr_pages_spin = QSpinBox()
         self.ocr_pages_spin.setRange(1, 50)
         self.ocr_pages_spin.setValue(1)
         self.ocr_pages_spin.valueChanged.connect(self.update_preview)
-        h3b.addWidget(self.ocr_pages_spin)
+        pages_row.addWidget(self.ocr_pages_spin)
+        ocr_layout.addLayout(pages_row)
 
         self.char_count_label = QLabel("Characters retrieved: 0")
-        h3b.addWidget(self.char_count_label)
-        self.settings_layout.addLayout(h3b)
+        ocr_layout.addWidget(self.char_count_label)
+        ocr_group.setLayout(ocr_layout)
+        controls_layout.addWidget(ocr_group)
 
-        self.settings_layout.addWidget(QLabel("Filename template (ordered elements):"))
-        template_builder = QHBoxLayout()
-
-        selector_col = QVBoxLayout()
-        selector_row = QHBoxLayout()
-        self.template_selector = QComboBox()
-        self.template_selector.addItem("Date (today)", "date")
-        self.template_selector.addItem("Plaintiff", "plaintiff")
-        self.template_selector.addItem("Defendant", "defendant")
-        self.template_selector.addItem("Letter type", "letter_type")
-        selector_row.addWidget(self.template_selector)
-        add_template_btn = QPushButton("Add element")
-        add_template_btn.clicked.connect(self.add_template_element)
-        selector_row.addWidget(add_template_btn)
-        selector_col.addLayout(selector_row)
-
-        template_builder.addLayout(selector_col)
-
-        list_col = QHBoxLayout()
-        self.template_list = QListWidget()
-        self.template_list.setSelectionMode(
-            self.template_list.SelectionMode.SingleSelection
-        )
-        self.template_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.template_list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.template_list.model().rowsMoved.connect(lambda *_: self.update_preview())
-        for element in DEFAULT_TEMPLATE_ELEMENTS:
-            self.add_template_item(element, refresh=False)
-        self.update_preview()
-        list_col.addWidget(self.template_list)
-
-        buttons_col = QVBoxLayout()
-        remove_btn = QPushButton("Remove")
-        remove_btn.clicked.connect(self.remove_selected_template_element)
-
-        buttons_col.addWidget(remove_btn)
-        buttons_col.addStretch()
-        list_col.addLayout(buttons_col)
-
-        template_builder.addLayout(list_col)
-        self.settings_layout.addLayout(template_builder)
-
+        ai_group = QFrame()
+        ai_layout = QVBoxLayout()
         backend_row = QHBoxLayout()
         backend_row.addWidget(QLabel("AI Engine:"))
         self.backend_combo = QComboBox()
@@ -1214,98 +1232,150 @@ class RenamerGUI(QWidget):
         self.ollama_badge = QLabel("")
         backend_row.addWidget(self.ollama_badge)
         backend_row.addStretch()
-        self.settings_layout.addLayout(backend_row)
+        ai_layout.addLayout(backend_row)
 
         turbo_row = QHBoxLayout()
         self.turbo_mode_checkbox = QCheckBox("Turbo mode (parallel AI queries)")
         self.turbo_mode_checkbox.setToolTip("Send a couple of requests to each backend and keep the first valid answer.")
         turbo_row.addWidget(self.turbo_mode_checkbox)
         turbo_row.addStretch()
-        self.settings_layout.addLayout(turbo_row)
+        ai_layout.addLayout(turbo_row)
+        ai_group.setLayout(ai_layout)
+        controls_layout.addWidget(ai_group)
 
-        name_order_row = QHBoxLayout()
-        name_order_row.addWidget(QLabel("Plaintiff order:"))
+        order_group = QFrame()
+        order_layout = QHBoxLayout()
+        order_layout.addWidget(QLabel("Plaintiff order:"))
         self.plaintiff_order_combo = QComboBox()
         self.plaintiff_order_combo.addItem("Surname Name", True)
         self.plaintiff_order_combo.addItem("Name Surname", False)
         self.plaintiff_order_combo.currentIndexChanged.connect(self.update_preview)
-        name_order_row.addWidget(self.plaintiff_order_combo)
+        order_layout.addWidget(self.plaintiff_order_combo)
 
-        name_order_row.addWidget(QLabel("Defendant order:"))
+        order_layout.addWidget(QLabel("Defendant order:"))
         self.defendant_order_combo = QComboBox()
         self.defendant_order_combo.addItem("Surname Name", True)
         self.defendant_order_combo.addItem("Name Surname", False)
         self.defendant_order_combo.currentIndexChanged.connect(self.update_preview)
-        name_order_row.addWidget(self.defendant_order_combo)
+        order_layout.addWidget(self.defendant_order_combo)
+        order_layout.addStretch()
+        order_group.setLayout(order_layout)
+        controls_layout.addWidget(order_group)
+        controls_layout.addStretch()
+        controls_frame.setLayout(controls_layout)
+        self.settings_layout.addWidget(controls_frame, 1)
 
-        name_order_row.addStretch()
-        self.settings_layout.addLayout(name_order_row)
-        
-        self.main_layout.addWidget(QLabel("Files and proposed names:"))
-        self.file_table = QTableWidget(0, 2)
-        self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
-        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.file_table.verticalHeader().setVisible(False)
-        self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
-        self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
-        self.file_table.cellClicked.connect(self.on_row_selected)
-        self.main_layout.addWidget(self.file_table)
+        template_frame = QFrame()
+        template_layout = QVBoxLayout()
+        template_layout.addWidget(QLabel("Filename template"))
 
-        # Filename editing
-        h4 = QHBoxLayout()
-        h4.addWidget(QLabel("Proposed filename:"))
-        self.filename_edit = QLineEdit()
-        self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
-        h4.addWidget(self.filename_edit)
-        self.main_layout.addLayout(h4)
+        selector_row = QHBoxLayout()
+        self.template_selector = QComboBox()
+        self.template_selector.addItem("Date (today)", "date")
+        self.template_selector.addItem("Plaintiff", "plaintiff")
+        self.template_selector.addItem("Defendant", "defendant")
+        self.template_selector.addItem("Letter type", "letter_type")
+        selector_row.addWidget(self.template_selector)
+        add_template_btn = QPushButton("Add element")
+        add_template_btn.clicked.connect(self.add_template_element)
+        selector_row.addWidget(add_template_btn)
+        template_layout.addLayout(selector_row)
 
-        preview_row = QHBoxLayout()
-        preview_label = QLabel("Live preview:")
-        preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        preview_row.addWidget(preview_label)
-        preview_row.addWidget(self.preview_value)
-        preview_row.addStretch()
-        self.main_layout.addLayout(preview_row)
-
-        self.ocr_preview_label = QLabel("OCR text sent to AI:")
-        self.ocr_preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        self.ocr_preview = QTextEdit()
-        self.ocr_preview.setReadOnly(True)
-        self.ocr_preview.setPlaceholderText(
-            "The OCR excerpt forwarded to the AI/backend will appear here."
+        template_builder = QHBoxLayout()
+        self.template_list = QListWidget()
+        self.template_list.setSelectionMode(
+            self.template_list.SelectionMode.SingleSelection
         )
-        self.ocr_preview.setMinimumHeight(140)
-        self.main_layout.addWidget(self.ocr_preview_label)
-        self.main_layout.addWidget(self.ocr_preview)
+        self.template_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.template_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.template_list.model().rowsMoved.connect(lambda *_: self.update_preview())
+        for element in DEFAULT_TEMPLATE_ELEMENTS:
+            self.add_template_item(element, refresh=False)
+        self.update_preview()
+        template_builder.addWidget(self.template_list)
 
-        # Buttons row
-        h5 = QHBoxLayout()
+        buttons_col = QVBoxLayout()
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self.remove_selected_template_element)
+        buttons_col.addWidget(remove_btn)
+        buttons_col.addStretch()
+        template_builder.addLayout(buttons_col)
 
-        btn_process = QPushButton("✎ Rename File")
-        btn_process.clicked.connect(self.process_this_file)
-        self.btn_process = btn_process
+        template_layout.addLayout(template_builder)
+        template_frame.setLayout(template_layout)
+        self.settings_layout.addWidget(template_frame, 1)
 
-        btn_all = QPushButton("⏩ Rename All")
-        btn_all.clicked.connect(self.process_all_files_safe)
-        self.btn_all = btn_all
+        # Distribution page (Page 2)
+        self.distribution_layout = QVBoxLayout()
+        self.distribution_layout.setSpacing(12)
+        self.distribution_page.setLayout(self.distribution_layout)
 
-        btn_quit = QPushButton("Quit")
-        btn_quit.clicked.connect(self.close)
+        dist_frame = QFrame()
+        dist_frame_layout = QVBoxLayout()
+        dist_input_row = QHBoxLayout()
+        dist_input_row.addWidget(QLabel("Folder containing PDFs to distribute:"))
+        self.distribution_input_edit = QLineEdit()
+        dist_input_row.addWidget(self.distribution_input_edit)
+        self.distribution_input_button = QPushButton("Browse")
+        self.distribution_input_button.clicked.connect(self.choose_distribution_input)
+        dist_input_row.addWidget(self.distribution_input_button)
+        dist_frame_layout.addLayout(dist_input_row)
 
-        h5.addWidget(btn_process)
-        h5.addWidget(btn_all)
-        h5.addWidget(btn_quit)
-        self.main_layout.addLayout(h5)
+        dist_cases_row = QHBoxLayout()
+        dist_cases_row.addWidget(QLabel("Case folders root:"))
+        self.case_root_edit = QLineEdit()
+        dist_cases_row.addWidget(self.case_root_edit)
+        self.case_root_button = QPushButton("Browse")
+        self.case_root_button.clicked.connect(self.choose_case_root)
+        dist_cases_row.addWidget(self.case_root_button)
+        dist_frame_layout.addLayout(dist_cases_row)
+        dist_frame.setLayout(dist_frame_layout)
+        self.distribution_layout.addWidget(dist_frame)
 
-        copyright_label = QLabel("Copyright 2025-2026 Przemek1337 all rights reserved")
-        copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        copyright_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        self.main_layout.addWidget(copyright_label)
+        mode_frame = QFrame()
+        mode_row = QHBoxLayout()
+        self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
+        self.copy_mode_checkbox.setChecked(True)
+        self.copy_mode_checkbox.setEnabled(False)
+        mode_row.addWidget(self.copy_mode_checkbox)
+        mode_row.addStretch()
+        mode_frame.setLayout(mode_row)
+        self.distribution_layout.addWidget(mode_frame)
+
+        dist_controls_frame = QFrame()
+        dist_controls = QHBoxLayout()
+        self.distribution_status_label = QLabel("Idle")
+        dist_controls.addWidget(self.distribution_status_label)
+        dist_controls.addStretch()
+        self.distribution_progress = QProgressBar()
+        self.distribution_progress.setRange(0, 1)
+        self.distribution_progress.setValue(0)
+        self.distribution_progress.setTextVisible(True)
+        dist_controls.addWidget(self.distribution_progress)
+        self.distribute_button = QPushButton("▶ Distribute")
+        self.distribute_button.setObjectName("Primary")
+        self.distribute_button.clicked.connect(self.on_distribute_clicked)
+        dist_controls.addWidget(self.distribute_button)
+        dist_controls_frame.setLayout(dist_controls)
+        self.distribution_layout.addWidget(dist_controls_frame)
+
+        log_frame = QFrame()
+        log_layout = QVBoxLayout()
+        log_layout.addWidget(QLabel("Distribution log:"))
+        self.distribution_log_view = QTextEdit()
+        self.distribution_log_view.setReadOnly(True)
+        self.distribution_log_view.setPlaceholderText(
+            "Processing details will appear here. Copies are logged to disk as well."
+        )
+        self.distribution_log_view.setMinimumHeight(200)
+        log_layout.addWidget(self.distribution_log_view)
+        log_frame.setLayout(log_layout)
+        self.distribution_layout.addWidget(log_frame)
 
         # Status bar
         self.status_bar = QStatusBar()
         self.status_label = QLabel("Waiting for input…")
+        self.backend_status_label = QLabel("")
         self.spinner_label = QLabel("")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
@@ -1316,13 +1386,15 @@ class RenamerGUI(QWidget):
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.addWidget(self.spinner_label)
         status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.backend_status_label)
         status_layout.addStretch()
         status_layout.addWidget(self.progress_bar)
         status_widget.setLayout(status_layout)
         self.status_bar.addPermanentWidget(status_widget, 1)
-        root_layout.addWidget(self.status_bar)
+        self.setStatusBar(self.status_bar)
 
-        self.setLayout(root_layout)
+        self.sidebar.setCurrentRow(0)
+        self.update_backend_status_label()
 
         self.processing_enabled = False
         self.spinner_timer = QTimer(self)
@@ -1337,6 +1409,18 @@ class RenamerGUI(QWidget):
     # ------------------------------------------------------
     # UI helpers
     # ------------------------------------------------------
+
+    def on_sidebar_changed(self, index: int):
+        if index < 0 or index >= self.content_stack.count():
+            return
+        self.content_stack.setCurrentIndex(index)
+
+    def update_backend_status_label(self):
+        if not hasattr(self, "backend_combo"):
+            return
+        backend_text = self.backend_combo.currentText()
+        backend_name = backend_text.split("(")[0].strip()
+        self.backend_status_label.setText(f"AI: {backend_name}")
 
     def load_settings(self):
         self.input_edit.setText(self.settings.value("input_folder", ""))
@@ -1452,6 +1536,7 @@ class RenamerGUI(QWidget):
         self.distribution_progress.setValue(0)
 
     def check_ollama_status(self):
+        self.update_backend_status_label()
         if self.backend_combo.currentIndex() != 1:
             self.ollama_badge.setText("")
             return
@@ -2254,7 +2339,12 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Renamer")
     app.setApplicationDisplayName("Renamer")
-    app.setStyleSheet(GLOBAL_STYLESHEET)
+    qss_path = os.path.join(BASE_DIR, "retro.qss")
+    if os.path.exists(qss_path):
+        with open(qss_path, "r", encoding="utf-8") as f:
+            app.setStyleSheet(f.read())
+    else:
+        app.setStyleSheet(GLOBAL_STYLESHEET)
     logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
     icon_file = icon_path if os.path.exists(icon_path) else logo_path
