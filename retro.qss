@@ -53,8 +53,12 @@ QGroupBox::title {
     color: #00FF66;
 }
 
-QFrame {
-    border: 0;
+/* ---------------- TABLES ---------------- */
+
+QTableWidget {
+    background-color: #000000;
+    gridline-color: #00331A;
+    border: 2px solid #00FF66;
 }
 
 /* ---------------- INPUTS ---------------- */
