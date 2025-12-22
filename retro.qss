@@ -1,0 +1,113 @@
+/* ============================= */
+/* GLOBAL                        */
+/* ============================= */
+* {
+    font-family: "JetBrains Mono", "Consolas", monospace;
+    font-size: 11pt;
+    color: #EAEAEA;
+}
+
+QWidget {
+    background-color: #121212;
+}
+
+/* ============================= */
+/* SIDEBAR                       */
+/* ============================= */
+QListWidget#Sidebar {
+    background-color: #0E0E0E;
+    border-right: 1px solid #2A2A2A;
+}
+
+QListWidget#Sidebar::item {
+    padding: 10px;
+    color: #8A8A8A;
+}
+
+QListWidget#Sidebar::item:selected {
+    background-color: #1B1B1B;
+    color: #5B8CFF;
+    border-left: 4px solid #5B8CFF;
+}
+
+/* ============================= */
+/* HEADERS / LABELS              */
+/* ============================= */
+QLabel#Title {
+    font-size: 16pt;
+    font-weight: bold;
+    color: #5B8CFF;
+}
+
+QLabel#Subtitle {
+    font-size: 9pt;
+    color: #8A8A8A;
+}
+
+/* ============================= */
+/* PANELS (CARDS)                */
+/* ============================= */
+QFrame {
+    background-color: #1B1B1B;
+    border: 1px solid #2A2A2A;
+}
+
+/* ============================= */
+/* INPUTS                        */
+/* ============================= */
+QLineEdit, QTextEdit, QSpinBox, QComboBox {
+    background-color: #0E0E0E;
+    border: 1px solid #2A2A2A;
+    padding: 6px;
+}
+
+QLineEdit:focus, QTextEdit:focus {
+    border: 1px solid #5B8CFF;
+}
+
+/* ============================= */
+/* BUTTONS                       */
+/* ============================= */
+QPushButton {
+    background-color: #1F1F1F;
+    border: 1px solid #2A2A2A;
+    padding: 8px;
+}
+
+QPushButton:hover {
+    border: 1px solid #5B8CFF;
+}
+
+QPushButton:pressed {
+    background-color: #5B8CFF;
+    color: #121212;
+}
+
+/* PRIMARY ACTION */
+QPushButton#Primary {
+    background-color: #5B8CFF;
+    color: #121212;
+    font-weight: bold;
+}
+
+/* ============================= */
+/* TABLES / LISTS                */
+/* ============================= */
+QTableWidget {
+    background-color: #0E0E0E;
+    gridline-color: #2A2A2A;
+}
+
+QHeaderView::section {
+    background-color: #1B1B1B;
+    border: 1px solid #2A2A2A;
+}
+
+/* ============================= */
+/* STATUS BAR                    */
+/* ============================= */
+QStatusBar {
+    background-color: #0E0E0E;
+    border-top: 1px solid #2A2A2A;
+    color: #8A8A8A;
+}
