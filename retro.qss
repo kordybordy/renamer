@@ -1,6 +1,10 @@
-/* ============================= */
-/* GLOBAL                        */
-/* ============================= */
+/* =========================================================
+   RENAMER — EXTREME DOS / GAME TRAINER THEME
+   Brutal, high-contrast, pixel-terminal aesthetic
+   ========================================================= */
+
+/* ---------------- GLOBAL RESET ---------------- */
+
 * {
     font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
     font-size: 10pt;
@@ -8,7 +12,14 @@
 }
 
 QWidget {
-    background-color: #0e0e11;
+    background-color: #000000000;
+}
+
+/* ---------------- MAIN WINDOW ---------------- */
+
+QMainWindow {
+    background-color: #000000;
+    border: 3px solid #00FF66;
 }
 
 /* ============================= */
@@ -38,19 +49,22 @@ QPushButton#ModeButton {
     border-radius: 0;
 }
 
-QPushButton#ModeButton:checked {
-    background: #1e1e29;
-    color: #7aa2f7;
-    border-color: #7aa2f7;
+QListWidget::item:hover {
+    background-color: #001A0D;
 }
 
-QPushButton#ModeButton:hover {
-    border-color: #7aa2f7;
+/* ---------------- HEADERS / TITLES ---------------- */
+
+QLabel#TitleLabel {
+    font-size: 16px;
+    font-weight: bold;
+    color: #00FF66;
+    border-bottom: 2px solid #00FF66;
+    padding-bottom: 6px;
 }
 
-/* ============================= */
-/* GROUP BOXES                   */
-/* ============================= */
+/* ---------------- GROUP BOXES ---------------- */
+
 QGroupBox {
     border: 1px solid #3a3a44;
     margin-top: 8px;
@@ -66,8 +80,12 @@ QGroupBox::title {
     color: #7aa2f7;
 }
 
-QFrame {
-    border: 0;
+/* ---------------- TABLES ---------------- */
+
+QTableWidget {
+    background-color: #000000;
+    gridline-color: #00331A;
+    border: 2px solid #00FF66;
 }
 
 /* ============================= */
@@ -85,9 +103,8 @@ QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
     border: 1px solid #7aa2f7;
 }
 
-/* ============================= */
-/* BUTTONS                       */
-/* ============================= */
+/* ---------------- BUTTONS ---------------- */
+
 QPushButton {
     background: #1a1a22;
     border: 1px solid #5a5a66;
@@ -97,11 +114,12 @@ QPushButton {
 }
 
 QPushButton:hover {
-    background: #232334;
+    background-color: #00331A;
 }
 
 QPushButton:pressed {
-    background: #101018;
+    background-color: #000000;
+    border: 2px solid #FFFFFF;
 }
 
 QPushButton#Primary {
@@ -131,15 +149,39 @@ QListWidget, QListView {
     border: 1px solid #3a3a44;
 }
 
-/* ============================= */
-/* STATUS / LOGS                 */
-/* ============================= */
+/* ---------------- STATUS BAR ---------------- */
+
 QStatusBar {
     background-color: #0b0b0f;
     border-top: 1px solid #3a3a44;
     color: #9aa0a7;
 }
 
-QPlainTextEdit {
-    font-family: "JetBrains Mono", monospace;
+/* ---------------- TOOLTIP ---------------- */
+
+QToolTip {
+    background-color: #000000;
+    color: #00FF66;
+    border: 1px solid #00FF66;
+    padding: 6px;
+}
+
+/* ---------------- SCROLLBARS ---------------- */
+
+QScrollBar:vertical {
+    background: #000000;
+    width: 14px;
+    border-left: 2px solid #00FF66;
+}
+
+QScrollBar::handle:vertical {
+    background: #00331A;
+    min-height: 20px;
+    border: 1px solid #00FF66;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line {
+    background: none;
+    height: 0px;
 }
