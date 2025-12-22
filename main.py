@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
-    QButtonGroup, QPlainTextEdit
+    QButtonGroup, QPlainTextEdit, QToolButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
@@ -272,8 +272,8 @@ TESSDATA_DIR = configure_tesseract()
 # AI SYSTEM PROMPT — returns structured JSON
 # ==========================================================
 
-SYSTEM_PROMPT = """
-Return strict JSON in this exact shape:
+BASE_SYSTEM_PROMPT = """
+Return strict JSON in this exact shape (include every listed field):
 
 {
   "plaintiff": ["Given Surname", ...],
@@ -299,9 +299,28 @@ Rules:
 """
 
 
+def build_system_prompt(custom_elements: dict[str, str]) -> str:
+    extras = ""
+    if custom_elements:
+        extra_lines = [f'"{name}": "string"' for name in custom_elements]
+        extras = ",\n  " + ",\n  ".join(extra_lines)
+        details = "\n".join(
+            [f'- {name}: {desc or "Return a concise string"}' for name, desc in custom_elements.items()]
+        )
+        guidance = f"\nCustom fields to add (as strings):\n{details}\n"
+    else:
+        guidance = ""
+    return BASE_SYSTEM_PROMPT.replace(
+        "}",
+        f'{extras}\n}}',
+        1,
+    ) + guidance
+
+
 @dataclass
 class NamingOptions:
     template_elements: list[str]
+    custom_elements: dict[str, str]
     ocr_enabled: bool
     ocr_char_limit: int
     ocr_dpi: int
@@ -518,14 +537,14 @@ def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
     return text
 
 
-def call_openai_model(text: str) -> str:
+def call_openai_model(text: str, prompt: str) -> str:
     """Call OpenAI with fallback models, returning the raw content."""
 
     try:
         resp = client.chat.completions.create(
             model="gpt-5-nano",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": text},
             ],
         )
@@ -537,20 +556,20 @@ def call_openai_model(text: str) -> str:
         model="gpt-4.1-mini",
         temperature=0.0,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": text},
         ],
     )
     return resp.choices[0].message.content
 
 
-def call_ollama_model(text: str) -> str:
+def call_ollama_model(text: str, prompt: str) -> str:
     """Call a local Ollama model using the same system prompt."""
 
     try:
         payload = {
             "model": "qwen2.5:7b",
-            "prompt": f"{SYSTEM_PROMPT}\n\n{text}",
+            "prompt": f"{prompt}\n\n{text}",
             "stream": False,
         }
         resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
@@ -595,7 +614,7 @@ def parse_json_content(content: str, source: str) -> dict:
     return parsed
 
 
-def parse_ai_metadata(raw: str) -> dict:
+def parse_ai_metadata(raw: str, custom_keys: list[str]) -> dict:
     """Convert AI JSON into the meta structure expected by the app."""
 
     try:
@@ -636,17 +655,29 @@ def parse_ai_metadata(raw: str) -> dict:
     if isinstance(lt, str) and lt.strip():
         meta["letter_type"] = lt.strip()
 
+    case_numbers = data.get("case_numbers")
+    if isinstance(case_numbers, list) and case_numbers:
+        first_case = next((c for c in case_numbers if isinstance(c, str) and c.strip()), "")
+        if first_case:
+            meta["case_number"] = first_case.strip()
+
+    for key in custom_keys:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            meta[key] = val.strip()
+
     return meta
 
 
-def query_backend_for_meta(target: str, ocr_text: str) -> dict:
+def query_backend_for_meta(target: str, ocr_text: str, custom_elements: dict[str, str]) -> dict:
+    prompt = build_system_prompt(custom_elements)
     raw = ""
     try:
         if target == "ollama":
-            raw = call_ollama_model(ocr_text)
+            raw = call_ollama_model(ocr_text, prompt)
         else:
-            raw = call_openai_model(ocr_text)
-        meta = parse_ai_metadata(raw)
+            raw = call_openai_model(ocr_text, prompt)
+        meta = parse_ai_metadata(raw, list(custom_elements.keys()))
         if meta:
             log_info(f"AI metadata extracted using {target}")
             return meta
@@ -655,13 +686,13 @@ def query_backend_for_meta(target: str, ocr_text: str) -> dict:
     return {}
 
 
-def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], attempts_per_backend: int = 2) -> dict:
+def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], custom_elements: dict[str, str], attempts_per_backend: int = 2) -> dict:
     workers = max(1, len(backends) * attempts_per_backend)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {}
         for target in backends:
             for _ in range(attempts_per_backend):
-                future = executor.submit(query_backend_for_meta, target, ocr_text)
+                future = executor.submit(query_backend_for_meta, target, ocr_text, custom_elements)
                 future_map[future] = target
         for fut in as_completed(future_map):
             try:
@@ -677,7 +708,7 @@ def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], attempts_per_b
     return {}
 
 
-def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dict:
+def extract_metadata_ai(ocr_text: str, backend: str, custom_elements: dict[str, str], turbo: bool = False) -> dict:
     """Use AI backend to extract metadata; returns empty dict on failure."""
 
     if not ocr_text.strip():
@@ -685,7 +716,7 @@ def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dic
 
     if turbo:
         backends = ["ollama", "openai"]
-        meta = extract_metadata_ai_turbo(ocr_text, backends)
+        meta = extract_metadata_ai_turbo(ocr_text, backends, custom_elements)
         if meta:
             return meta
     else:
@@ -694,20 +725,24 @@ def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dic
             backends = ["ollama", "openai"]
 
     for target in backends:
-        meta = query_backend_for_meta(target, ocr_text)
+        meta = query_backend_for_meta(target, ocr_text, custom_elements)
         if meta:
             return meta
 
     return {}
 
 
-def requirements_from_template(template: list[str]) -> dict:
+def requirements_from_template(template: list[str], custom_elements: dict[str, str] | None = None) -> dict:
     requirements = {
         "plaintiff": True if "plaintiff" in template else False,
         "defendant": True if "defendant" in template else False,
         "letter_type": True if "letter_type" in template else False,
         "date": True if "date" in template else False,
+        "case_number": True if "case_number" in template else False,
     }
+    if custom_elements:
+        for key in custom_elements:
+            requirements[key] = True
     return requirements
 
 
@@ -721,6 +756,11 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("plaintiff", "Plaintiff")
     if requirements.get("defendant"):
         meta.setdefault("defendant", "Defendant")
+    if requirements.get("case_number"):
+        meta.setdefault("case_number", "Case-Number")
+    for key in requirements:
+        if key not in ("plaintiff", "defendant", "letter_type", "date", "case_number"):
+            meta.setdefault(key, key.replace("_", " ").title())
     return meta
 
 
@@ -842,7 +882,7 @@ class FileProcessWorker(QThread):
         self.options = options
         self.stop_event = stop_event
         self.backend = backend
-        self.requirements = requirements_from_template(options.template_elements)
+        self.requirements = requirements_from_template(options.template_elements, options.custom_elements)
 
     def run(self):
         try:
@@ -866,7 +906,7 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.turbo_mode)
+            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.custom_elements, self.options.turbo_mode)
             meta = ai_meta or {}
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
@@ -1023,7 +1063,7 @@ class RenamerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Renamer")
-        self.resize(1100, 780)
+        self.resize(1020, 720)
 
         self.settings = QSettings("Renamer", "Renamer")
 
@@ -1042,25 +1082,20 @@ class RenamerGUI(QMainWindow):
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
         self.distribution_csv_log: str | None = None
-
-        # Widgets used across the UI
-        self.preview_value = QLineEdit("—")
-        self.preview_value.setReadOnly(True)
-        self.preview_value.setPlaceholderText("Preview generated filename")
-        self.preview_value.setMinimumHeight(32)
+        self.custom_elements: dict[str, str] = {}
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         root_layout = QVBoxLayout()
-        root_layout.setContentsMargins(16, 16, 16, 16)
-        root_layout.setSpacing(16)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setSpacing(12)
         central_widget.setLayout(root_layout)
 
         header_frame = QFrame()
         header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(8, 8, 8, 8)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(6, 6, 6, 6)
+        header_layout.setSpacing(6)
         logo_path = None
         for candidate in ("logo-32.png", "logo-square.png", "logo.png"):
             candidate_path = os.path.join(BASE_DIR, "assets", candidate)
@@ -1075,9 +1110,9 @@ class RenamerGUI(QMainWindow):
             )
             header_layout.addWidget(logo_label)
         title_col = QVBoxLayout()
-        title_col.setSpacing(8)
+        title_col.setSpacing(4)
         title_label = QLabel("[R] Renamer")
-        title_label.setObjectName("Title")
+        title_label.setObjectName("TitleLabel")
         subtitle_label = QLabel("Smart document naming")
         subtitle_label.setObjectName("Subtitle")
         title_col.addWidget(title_label)
@@ -1090,7 +1125,7 @@ class RenamerGUI(QMainWindow):
         mode_bar = QFrame()
         mode_bar_layout = QHBoxLayout()
         mode_bar_layout.setContentsMargins(0, 0, 0, 0)
-        mode_bar_layout.setSpacing(8)
+        mode_bar_layout.setSpacing(6)
         self.mode_buttons = QButtonGroup(self)
         self.mode_buttons.setExclusive(True)
         self.mode_buttons.idClicked.connect(self.on_mode_changed)
@@ -1122,22 +1157,48 @@ class RenamerGUI(QMainWindow):
         self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.distribution_page)
 
+        def build_collapsible_section(title: str, body: QWidget, collapsed: bool = True) -> QWidget:
+            container = QFrame()
+            container_layout = QVBoxLayout()
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(4)
+            toggle = QToolButton()
+            toggle.setText(title)
+            toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            toggle.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
+            toggle.setCheckable(True)
+            toggle.setChecked(not collapsed)
+            toggle.setObjectName("CollapsibleToggle")
+            body.setVisible(not collapsed)
+
+            def on_toggled(checked: bool):
+                body.setVisible(checked)
+                toggle.setArrowType(
+                    Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+                )
+
+            toggle.toggled.connect(on_toggled)
+            container_layout.addWidget(toggle)
+            container_layout.addWidget(body)
+            container.setLayout(container_layout)
+            return container
+
         # Main page (Page 0)
         self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(16)
+        self.main_layout.setSpacing(12)
         self.main_page.setLayout(self.main_layout)
 
         io_group = QGroupBox("PATHS")
         io_layout = QVBoxLayout()
-        io_layout.setSpacing(8)
-        io_layout.setContentsMargins(16, 16, 16, 16)
+        io_layout.setSpacing(6)
+        io_layout.setContentsMargins(12, 12, 12, 12)
         input_col = QVBoxLayout()
-        input_col.setSpacing(8)
+        input_col.setSpacing(6)
         input_label = QLabel("Input folder:")
         input_col.addWidget(input_label)
         self.input_edit = QLineEdit()
         input_row = QHBoxLayout()
-        input_row.setSpacing(8)
+        input_row.setSpacing(6)
         input_row.addWidget(self.input_edit)
         btn_input = QPushButton("BROWSE")
         btn_input.clicked.connect(self.choose_input)
@@ -1146,11 +1207,11 @@ class RenamerGUI(QMainWindow):
         io_layout.addLayout(input_col)
 
         output_col = QVBoxLayout()
-        output_col.setSpacing(8)
+        output_col.setSpacing(6)
         output_col.addWidget(QLabel("Output folder:"))
         self.output_edit = QLineEdit()
         output_row = QHBoxLayout()
-        output_row.setSpacing(8)
+        output_row.setSpacing(6)
         output_row.addWidget(self.output_edit)
         btn_output = QPushButton("BROWSE")
         btn_output.clicked.connect(self.choose_output)
@@ -1162,11 +1223,11 @@ class RenamerGUI(QMainWindow):
 
         action_group = QGroupBox("COMMAND")
         action_layout = QHBoxLayout()
-        action_layout.setSpacing(8)
-        action_layout.setContentsMargins(16, 16, 16, 16)
+        action_layout.setSpacing(6)
+        action_layout.setContentsMargins(12, 12, 12, 12)
         action_layout.addStretch()
         self.play_button = QPushButton("SCAN")
-        self.play_button.setObjectName("Primary")
+        self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
         action_layout.addWidget(self.play_button)
         self.stop_button = QPushButton("STOP")
@@ -1181,8 +1242,8 @@ class RenamerGUI(QMainWindow):
 
         table_group = QGroupBox("FILES")
         table_layout = QVBoxLayout()
-        table_layout.setSpacing(8)
-        table_layout.setContentsMargins(16, 16, 16, 16)
+        table_layout.setSpacing(6)
+        table_layout.setContentsMargins(12, 12, 12, 12)
         self.file_table = QTableWidget(0, 2)
         self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1197,61 +1258,56 @@ class RenamerGUI(QMainWindow):
 
         preview_group = QGroupBox("FILENAME")
         preview_layout = QVBoxLayout()
-        preview_layout.setSpacing(8)
-        preview_layout.setContentsMargins(16, 16, 16, 16)
+        preview_layout.setSpacing(6)
+        preview_layout.setContentsMargins(12, 12, 12, 12)
         name_col = QVBoxLayout()
-        name_col.setSpacing(8)
+        name_col.setSpacing(6)
         name_col.addWidget(QLabel("Proposed filename:"))
         self.filename_edit = QLineEdit()
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         name_col.addWidget(self.filename_edit)
         preview_layout.addLayout(name_col)
-
-        live_col = QVBoxLayout()
-        live_col.setSpacing(8)
-        live_col.addWidget(QLabel("Live preview:"))
-        live_col.addWidget(self.preview_value)
-        preview_layout.addLayout(live_col)
         preview_group.setLayout(preview_layout)
         self.main_layout.addWidget(preview_group)
 
-        ocr_group = QGroupBox("OCR EXCERPT")
+        ocr_group = QGroupBox("")
         ocr_layout = QVBoxLayout()
-        ocr_layout.setSpacing(8)
-        ocr_layout.setContentsMargins(16, 16, 16, 16)
+        ocr_layout.setSpacing(6)
+        ocr_layout.setContentsMargins(12, 12, 12, 12)
         self.ocr_preview_label = QLabel("OCR text sent to AI:")
         self.ocr_preview = QTextEdit()
         self.ocr_preview.setReadOnly(True)
         self.ocr_preview.setPlaceholderText(
             "The OCR excerpt forwarded to the AI/backend will appear here."
         )
-        self.ocr_preview.setMinimumHeight(140)
+        self.ocr_preview.setMinimumHeight(110)
         ocr_layout.addWidget(self.ocr_preview_label)
         ocr_layout.addWidget(self.ocr_preview)
         ocr_group.setLayout(ocr_layout)
-        self.main_layout.addWidget(ocr_group)
+        self.main_layout.addWidget(build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True))
 
-        log_group = QGroupBox("STATUS LOG")
+        log_group = QGroupBox("")
         log_layout = QVBoxLayout()
-        log_layout.setSpacing(8)
-        log_layout.setContentsMargins(16, 16, 16, 16)
+        log_layout.setSpacing(6)
+        log_layout.setContentsMargins(12, 12, 12, 12)
         self.status_log = QPlainTextEdit()
         self.status_log.setReadOnly(True)
         self.status_log.setPlaceholderText("[hh:mm:ss] status messages appear here")
-        self.status_log.setMinimumHeight(140)
+        self.status_log.setMinimumHeight(110)
+        self.status_log.setObjectName("StatusLog")
         log_layout.addWidget(self.status_log)
         log_group.setLayout(log_layout)
-        self.main_layout.addWidget(log_group)
+        self.main_layout.addWidget(build_collapsible_section("STATUS LOG", log_group, collapsed=True))
 
         bottom_group = QGroupBox("ACTIONS")
         bottom_layout = QHBoxLayout()
-        bottom_layout.setSpacing(8)
-        bottom_layout.setContentsMargins(16, 16, 16, 16)
-        btn_process = QPushButton("COMMIT FILE")
+        bottom_layout.setSpacing(6)
+        bottom_layout.setContentsMargins(12, 12, 12, 12)
+        btn_process = QPushButton("EXECUTE ONE")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
 
-        btn_all = QPushButton("EXECUTE")
+        btn_all = QPushButton("EXECUTE ALL")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
@@ -1267,24 +1323,24 @@ class RenamerGUI(QMainWindow):
 
         # Settings page (Page 1)
         self.settings_layout = QHBoxLayout()
-        self.settings_layout.setSpacing(16)
+        self.settings_layout.setSpacing(12)
         self.settings_page.setLayout(self.settings_layout)
 
         controls_group = QGroupBox("AI + OCR")
         controls_layout = QVBoxLayout()
-        controls_layout.setSpacing(16)
-        controls_layout.setContentsMargins(16, 16, 16, 16)
+        controls_layout.setSpacing(12)
+        controls_layout.setContentsMargins(12, 12, 12, 12)
 
         ocr_group = QGroupBox("OCR SETTINGS")
         ocr_layout = QVBoxLayout()
-        ocr_layout.setSpacing(8)
+        ocr_layout.setSpacing(6)
         self.run_ocr_checkbox = QCheckBox("Run OCR")
         self.run_ocr_checkbox.setChecked(True)
         self.run_ocr_checkbox.toggled.connect(self.update_preview)
         ocr_layout.addWidget(self.run_ocr_checkbox)
 
         char_col = QVBoxLayout()
-        char_col.setSpacing(8)
+        char_col.setSpacing(6)
         char_col.addWidget(QLabel("Max characters:"))
         self.char_limit_spin = QSpinBox()
         self.char_limit_spin.setRange(100, 10000)
@@ -1295,7 +1351,7 @@ class RenamerGUI(QMainWindow):
         ocr_layout.addLayout(char_col)
 
         dpi_col = QVBoxLayout()
-        dpi_col.setSpacing(8)
+        dpi_col.setSpacing(6)
         dpi_col.addWidget(QLabel("OCR DPI:"))
         self.ocr_dpi_spin = QSpinBox()
         self.ocr_dpi_spin.setRange(72, 600)
@@ -1305,7 +1361,7 @@ class RenamerGUI(QMainWindow):
         ocr_layout.addLayout(dpi_col)
 
         pages_col = QVBoxLayout()
-        pages_col.setSpacing(8)
+        pages_col.setSpacing(6)
         pages_col.addWidget(QLabel("Pages to scan:"))
         self.ocr_pages_spin = QSpinBox()
         self.ocr_pages_spin.setRange(1, 50)
@@ -1321,12 +1377,12 @@ class RenamerGUI(QMainWindow):
 
         ai_group = QGroupBox("AI ENGINE")
         ai_layout = QVBoxLayout()
-        ai_layout.setSpacing(8)
+        ai_layout.setSpacing(6)
         backend_col = QVBoxLayout()
-        backend_col.setSpacing(8)
+        backend_col.setSpacing(6)
         backend_col.addWidget(QLabel("Engine:"))
         backend_row = QHBoxLayout()
-        backend_row.setSpacing(8)
+        backend_row.setSpacing(6)
         self.backend_combo = QComboBox()
         self.backend_combo.addItems([
             "OpenAI (cloud)",
@@ -1344,7 +1400,7 @@ class RenamerGUI(QMainWindow):
         ai_layout.addLayout(backend_col)
 
         turbo_col = QVBoxLayout()
-        turbo_col.setSpacing(8)
+        turbo_col.setSpacing(6)
         turbo_col.addWidget(QLabel("Parallelism:"))
         self.turbo_mode_checkbox = QCheckBox("Turbo mode (parallel AI queries)")
         self.turbo_mode_checkbox.setToolTip("Send a couple of requests to each backend and keep the first valid answer.")
@@ -1355,9 +1411,9 @@ class RenamerGUI(QMainWindow):
 
         order_group = QGroupBox("NAME ORDER")
         order_layout = QVBoxLayout()
-        order_layout.setSpacing(8)
+        order_layout.setSpacing(6)
         plaintiff_col = QVBoxLayout()
-        plaintiff_col.setSpacing(8)
+        plaintiff_col.setSpacing(6)
         plaintiff_col.addWidget(QLabel("Plaintiff order:"))
         self.plaintiff_order_combo = QComboBox()
         self.plaintiff_order_combo.addItem("Surname Name", True)
@@ -1367,7 +1423,7 @@ class RenamerGUI(QMainWindow):
         order_layout.addLayout(plaintiff_col)
 
         defendant_col = QVBoxLayout()
-        defendant_col.setSpacing(8)
+        defendant_col.setSpacing(6)
         defendant_col.addWidget(QLabel("Defendant order:"))
         self.defendant_order_combo = QComboBox()
         self.defendant_order_combo.addItem("Surname Name", True)
@@ -1383,28 +1439,41 @@ class RenamerGUI(QMainWindow):
 
         template_group = QGroupBox("FILENAME TEMPLATE")
         template_layout = QVBoxLayout()
-        template_layout.setSpacing(8)
-        template_layout.setContentsMargins(16, 16, 16, 16)
+        template_layout.setSpacing(6)
+        template_layout.setContentsMargins(12, 12, 12, 12)
 
         selector_col = QVBoxLayout()
-        selector_col.setSpacing(8)
+        selector_col.setSpacing(6)
         selector_col.addWidget(QLabel("Add element:"))
         selector_row = QHBoxLayout()
-        selector_row.setSpacing(8)
+        selector_row.setSpacing(6)
         self.template_selector = QComboBox()
         self.template_selector.addItem("Date (today)", "date")
         self.template_selector.addItem("Plaintiff", "plaintiff")
         self.template_selector.addItem("Defendant", "defendant")
         self.template_selector.addItem("Letter type", "letter_type")
+        self.template_selector.addItem("Case number", "case_number")
         selector_row.addWidget(self.template_selector)
         add_template_btn = QPushButton("ADD ELEMENT")
         add_template_btn.clicked.connect(self.add_template_element)
         selector_row.addWidget(add_template_btn)
         selector_col.addLayout(selector_row)
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(6)
+        self.custom_name_edit = QLineEdit()
+        self.custom_name_edit.setPlaceholderText("Custom element key (e.g., reference)")
+        self.custom_desc_edit = QLineEdit()
+        self.custom_desc_edit.setPlaceholderText("AI guidance for this element")
+        custom_add_btn = QPushButton("ADD CUSTOM ELEMENT")
+        custom_add_btn.clicked.connect(self.add_custom_element_from_inputs)
+        custom_row.addWidget(self.custom_name_edit)
+        custom_row.addWidget(self.custom_desc_edit)
+        custom_row.addWidget(custom_add_btn)
+        selector_col.addLayout(custom_row)
         template_layout.addLayout(selector_col)
 
         template_builder = QHBoxLayout()
-        template_builder.setSpacing(8)
+        template_builder.setSpacing(6)
         self.template_list = QListWidget()
         self.template_list.setSelectionMode(
             self.template_list.SelectionMode.SingleSelection
@@ -1418,7 +1487,7 @@ class RenamerGUI(QMainWindow):
         template_builder.addWidget(self.template_list)
 
         buttons_col = QVBoxLayout()
-        buttons_col.setSpacing(8)
+        buttons_col.setSpacing(6)
         remove_btn = QPushButton("REMOVE")
         remove_btn.clicked.connect(self.remove_selected_template_element)
         buttons_col.addWidget(remove_btn)
@@ -1431,18 +1500,18 @@ class RenamerGUI(QMainWindow):
 
         # Distribution page (Page 2)
         self.distribution_layout = QVBoxLayout()
-        self.distribution_layout.setSpacing(16)
+        self.distribution_layout.setSpacing(12)
         self.distribution_page.setLayout(self.distribution_layout)
 
         dist_paths_group = QGroupBox("DISTRIBUTION PATHS")
         dist_frame_layout = QVBoxLayout()
-        dist_frame_layout.setSpacing(8)
-        dist_frame_layout.setContentsMargins(16, 16, 16, 16)
+        dist_frame_layout.setSpacing(6)
+        dist_frame_layout.setContentsMargins(12, 12, 12, 12)
         dist_input_col = QVBoxLayout()
-        dist_input_col.setSpacing(8)
+        dist_input_col.setSpacing(6)
         dist_input_col.addWidget(QLabel("Folder containing PDFs to distribute:"))
         dist_input_row = QHBoxLayout()
-        dist_input_row.setSpacing(8)
+        dist_input_row.setSpacing(6)
         self.distribution_input_edit = QLineEdit()
         dist_input_row.addWidget(self.distribution_input_edit)
         self.distribution_input_button = QPushButton("BROWSE")
@@ -1452,10 +1521,10 @@ class RenamerGUI(QMainWindow):
         dist_frame_layout.addLayout(dist_input_col)
 
         dist_cases_col = QVBoxLayout()
-        dist_cases_col.setSpacing(8)
+        dist_cases_col.setSpacing(6)
         dist_cases_col.addWidget(QLabel("Case folders root:"))
         dist_cases_row = QHBoxLayout()
-        dist_cases_row.setSpacing(8)
+        dist_cases_row.setSpacing(6)
         self.case_root_edit = QLineEdit()
         dist_cases_row.addWidget(self.case_root_edit)
         self.case_root_button = QPushButton("BROWSE")
@@ -1468,7 +1537,7 @@ class RenamerGUI(QMainWindow):
 
         mode_group = QGroupBox("MODE")
         mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
+        mode_row.setSpacing(6)
         self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
         self.copy_mode_checkbox.setChecked(True)
         self.copy_mode_checkbox.setEnabled(False)
@@ -1479,7 +1548,7 @@ class RenamerGUI(QMainWindow):
 
         dist_controls_group = QGroupBox("EXECUTION")
         dist_controls = QHBoxLayout()
-        dist_controls.setSpacing(8)
+        dist_controls.setSpacing(6)
         self.distribution_status_label = QLabel("Idle")
         dist_controls.addWidget(self.distribution_status_label)
         dist_controls.addStretch()
@@ -1489,7 +1558,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_progress.setTextVisible(True)
         dist_controls.addWidget(self.distribution_progress)
         self.distribute_button = QPushButton("EXECUTE DISTRIBUTION")
-        self.distribute_button.setObjectName("Primary")
+        self.distribute_button.setObjectName("PrimaryButton")
         self.distribute_button.clicked.connect(self.on_distribute_clicked)
         dist_controls.addWidget(self.distribute_button)
         dist_controls_group.setLayout(dist_controls)
@@ -1497,14 +1566,14 @@ class RenamerGUI(QMainWindow):
 
         log_group = QGroupBox("DISTRIBUTION LOG")
         log_layout = QVBoxLayout()
-        log_layout.setSpacing(8)
-        log_layout.setContentsMargins(16, 16, 16, 16)
+        log_layout.setSpacing(6)
+        log_layout.setContentsMargins(12, 12, 12, 12)
         self.distribution_log_view = QTextEdit()
         self.distribution_log_view.setReadOnly(True)
         self.distribution_log_view.setPlaceholderText(
             "Processing details will appear here. Copies are logged to disk as well."
         )
-        self.distribution_log_view.setMinimumHeight(200)
+        self.distribution_log_view.setMinimumHeight(160)
         log_layout.addWidget(self.distribution_log_view)
         log_group.setLayout(log_layout)
         self.distribution_layout.addWidget(log_group)
@@ -1516,7 +1585,7 @@ class RenamerGUI(QMainWindow):
         status_widget = QWidget()
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(8)
+        status_layout.setSpacing(6)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.backend_status_label)
         status_layout.addStretch()
@@ -1568,6 +1637,12 @@ class RenamerGUI(QMainWindow):
         defendant_order_bool = str(defendant_order).lower() == "true"
         self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
         self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
+        saved_custom = self.settings.value("custom_elements", "{}")
+        try:
+            self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
+        except Exception:
+            self.custom_elements = {}
+        self.ensure_custom_selector_items()
         saved_template = self.settings.value("template", [])
         if isinstance(saved_template, str):
             saved_template = json.loads(saved_template) if saved_template else []
@@ -1588,6 +1663,7 @@ class RenamerGUI(QMainWindow):
         self.settings.setValue("case_root_folder", self.case_root_edit.text())
         self.settings.setValue("template", self.get_template_elements())
         self.settings.setValue("turbo_mode", self.turbo_mode_checkbox.isChecked())
+        self.settings.setValue("custom_elements", json.dumps(self.custom_elements))
         self.settings.setValue(
             "plaintiff_surname_first", bool(self.plaintiff_order_combo.currentData())
         )
@@ -1664,8 +1740,13 @@ class RenamerGUI(QMainWindow):
 
     def check_ollama_status(self):
         self.update_backend_status_label()
-        if self.backend_combo.currentIndex() != 1:
-            self.ollama_badge.setText("")
+        idx = self.backend_combo.currentIndex()
+        if idx != 1:
+            if idx == 0:
+                self.ollama_badge.setText("🌐 Cloud")
+            else:
+                self.ollama_badge.setText("⚙️ Auto")
+            self.ollama_badge.setStyleSheet("")
             return
         try:
             resp = requests.get(urljoin(OLLAMA_HOST, "api/tags"), timeout=2)
@@ -1863,7 +1944,7 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
 
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         self.log_activity(f"[Distribution] Running OCR/AI for '{filename}'")
         ocr_text = ""
         try:
@@ -1878,7 +1959,7 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
             ocr_text = ""
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
         meta = apply_meta_defaults(ai_meta or {}, requirements)
         meta = apply_party_order(meta, options)
         result = {"meta": meta, "raw_meta": ai_meta or {}, "ocr_text": ocr_text}
@@ -1982,6 +2063,7 @@ class RenamerGUI(QMainWindow):
     def build_options(self) -> NamingOptions:
         return NamingOptions(
             template_elements=self.get_template_elements(),
+            custom_elements=self.custom_elements,
             ocr_enabled=self.run_ocr_checkbox.isChecked(),
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
@@ -1997,6 +2079,7 @@ class RenamerGUI(QMainWindow):
             "plaintiff": "Plaintiff",
             "defendant": "Defendant",
             "letter_type": "Letter type",
+            "case_number": "Case number",
         }
         return mapping.get(element, element)
 
@@ -2007,11 +2090,29 @@ class RenamerGUI(QMainWindow):
         if refresh:
             self.update_preview()
 
+    def ensure_custom_selector_items(self):
+        existing = {self.template_selector.itemData(i) for i in range(self.template_selector.count())}
+        for key in self.custom_elements:
+            if key not in existing:
+                self.template_selector.addItem(f"Custom: {key}", key)
+
     def add_template_element(self):
         element = self.template_selector.currentData()
         if not element:
             return
         self.add_template_item(element)
+
+    def add_custom_element_from_inputs(self):
+        raw_name = (self.custom_name_edit.text() or "").strip()
+        desc = (self.custom_desc_edit.text() or "").strip()
+        key = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_name).strip("_").lower()
+        if not key:
+            self.append_status_message("[Template] Custom element name is required")
+            return
+        self.custom_elements[key] = desc
+        self.ensure_custom_selector_items()
+        self.add_template_item(key)
+        self.save_settings()
 
     def remove_selected_template_element(self):
         row = self.template_list.currentRow()
@@ -2061,12 +2162,10 @@ class RenamerGUI(QMainWindow):
         meta = self.meta or {}
         if self.current_index in self.file_results:
             meta = self.file_results[self.current_index].get("meta", meta)
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         meta = apply_meta_defaults(meta, requirements)
         meta = apply_party_order(meta, options)
         filename = build_filename(meta, options)
-        display_name = filename or "—"
-        self.preview_value.setText(display_name)
         if filename:
             self.filename_edit.blockSignals(True)
             self.filename_edit.setText(filename)
@@ -2366,7 +2465,7 @@ class RenamerGUI(QMainWindow):
         global AI_BACKEND
         AI_BACKEND = self.get_ai_backend()
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         self.log_activity(
             f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
             f"char_limit={options.ocr_char_limit}, backend={AI_BACKEND})"
@@ -2385,7 +2484,7 @@ class RenamerGUI(QMainWindow):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
         meta = ai_meta or {}
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
