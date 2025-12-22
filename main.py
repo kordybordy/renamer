@@ -52,8 +52,6 @@ FILENAME_RULES = {
     "default_letter_type": "pozew",   # fallback if AI unsure
 }
 
-BANNED_PARTY_KEYWORDS = ["dwf poland jamka"]
-
 
 DEFAULT_TEMPLATE_ELEMENTS = ["date", "plaintiff", "defendant", "letter_type"]
 
@@ -278,15 +276,16 @@ Return strict JSON in this exact shape:
   "plaintiff": ["Name Surname", ...],
   "defendant": ["Name Surname", ...],
   "case_numbers": ["I C 1234/25", ...],
-  "letter_type": "Pozew" | "Kontrpozew" | "Pozew + Postanowienie" |
+  "letter_type": "Pozew" | "Pozew + Postanowienie" |
                   "Postanowienie" | "Portal" | "Korespondencja" |
-                  "Unknown"
+                  "Unknown" | "Zawiadomienie" |
+                  "Odpowiedź na pozew" | "Wniosek" | "Replika" |
 }
 
 Rules:
-- Identify all parties. If Raiffeisen appears, the opposing side is the relevant one.
-- DWF Poland Jamka is never a plaintiff or defendant; ignore them in party lists.
-- Never include PESEL or similar personal identifiers inside party names.
+- Identify all parties. If Raiffeisen or DWF Jamka Poland appears, the opposing side is the relevant one.
+- DWF Poland Jamka or Raiifeisen Bank is never a plaintiff or defendant; ignore them in party lists.
+- Never include PESEL, address or similar personal identifiers inside party names.
 - Extract ALL case numbers.
 - Preserve Polish letters.
 - Infer letter type according to content.
