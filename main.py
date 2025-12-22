@@ -284,7 +284,7 @@ Return strict JSON in this exact shape:
 }
 
 Rules:
-- Identify all parties. If Raiffeisen or DWF Jamka Poland appears, the opposing side is the relevant one.
+- Identify all parties. 
 - DWF Poland Jamka or Raiifeisen Bank is never a plaintiff or defendant; ignore them in party lists.
 - Include every party on each side. Each list item must contain exactly one person or entity written as \"Given Surname\" (one given name and one surname). Do not merge multiple people into one string.
 - Never include PESEL, address or similar personal identifiers inside party names.
