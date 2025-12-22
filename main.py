@@ -1093,7 +1093,7 @@ class RenamerGUI(QMainWindow):
         mode_bar_layout.setSpacing(8)
         self.mode_buttons = QButtonGroup(self)
         self.mode_buttons.setExclusive(True)
-        self.mode_buttons.buttonClicked[int].connect(self.on_mode_changed)
+        self.mode_buttons.idClicked.connect(self.on_mode_changed)
 
         self.rename_mode_button = QPushButton("RENAME")
         self.rename_mode_button.setCheckable(True)
