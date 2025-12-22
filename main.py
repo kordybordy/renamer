@@ -15,6 +15,7 @@ import threading
 import requests
 from urllib.parse import urljoin
 from dataclasses import dataclass
+from typing import Callable, Dict, List, Tuple
 
 from PIL import Image
 import pytesseract
@@ -60,6 +61,7 @@ import traceback
 from datetime import datetime
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_error.log")
+DISTRIBUTION_LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_distribution.log")
 
 ACCENT_COLOR = "#4F7CFF"
 BACKGROUND_COLOR = "#1E1E1E"
@@ -167,6 +169,13 @@ def log_info(message: str):
     print(entry)
 
 
+def append_distribution_log(entry: str):
+    with open(DISTRIBUTION_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def show_friendly_error(
     parent: QWidget,
     title: str,
@@ -183,6 +192,28 @@ def show_friendly_error(
         box.setDetailedText(details)
     box.setIcon(icon)
     box.exec()
+
+
+# ===============================
+# Normalization helpers
+# ===============================
+
+def normalize_polish(text: str) -> str:
+    mapping = str.maketrans({
+        "ą": "a",
+        "ć": "c",
+        "ę": "e",
+        "ł": "l",
+        "ń": "n",
+        "ó": "o",
+        "ś": "s",
+        "ż": "z",
+        "ź": "z",
+    })
+    normalized = (text or "").lower()
+    normalized = normalized.translate(mapping)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 # ===============================
 # BASE DIR
@@ -519,6 +550,65 @@ def build_filename(meta: dict, options: NamingOptions) -> str:
     return filename
 
 
+@dataclass
+class CaseFolderInfo:
+    path: str
+    tokens: List[str]
+    full: str
+
+
+class DistributionManager:
+    def __init__(self, normalizer: Callable[[str], str]):
+        self.normalizer = normalizer
+
+    def build_case_index(self, case_root: str) -> List[CaseFolderInfo]:
+        entries: List[CaseFolderInfo] = []
+        for name in os.listdir(case_root):
+            full_path = os.path.join(case_root, name)
+            if not os.path.isdir(full_path):
+                continue
+            normalized = self.normalizer(name)
+            tokens = [tok for tok in normalized.split(" ") if tok]
+            entries.append(CaseFolderInfo(path=full_path, tokens=tokens, full=normalized))
+        return entries
+
+    def _defendant_tokens(self, defendant: str) -> Tuple[List[str], str]:
+        normalized = self.normalizer(defendant)
+        tokens = [tok for tok in normalized.split(" ") if tok]
+        surname = tokens[-1] if tokens else ""
+        return tokens, surname
+
+    def find_matches(self, defendants: List[str], case_index: List[CaseFolderInfo]) -> List[CaseFolderInfo]:
+        normalized_defendants = []
+        for defendant in defendants:
+            tokens, surname = self._defendant_tokens(defendant)
+            if tokens:
+                normalized_defendants.append((tokens, surname))
+
+        matches: Dict[str, CaseFolderInfo] = {}
+        for folder in case_index:
+            folder_token_set = set(folder.tokens)
+            for tokens, surname in normalized_defendants:
+                if surname and surname in folder_token_set:
+                    matches.setdefault(folder.path, folder)
+                    break
+                if surname and folder_token_set.issuperset(tokens):
+                    matches.setdefault(folder.path, folder)
+                    break
+        return list(matches.values())
+
+    def copy_pdf(self, source_path: str, target_dir: str, filename: str) -> str:
+        base, ext = os.path.splitext(filename)
+        candidate = filename
+        counter = 1
+        os.makedirs(target_dir, exist_ok=True)
+        while os.path.exists(os.path.join(target_dir, candidate)):
+            candidate = f"{base} ({counter}){ext}"
+            counter += 1
+        shutil.copy2(source_path, os.path.join(target_dir, candidate))
+        return candidate
+
+
 class FileProcessWorker(QThread):
     finished = pyqtSignal(int, dict)
     failed = pyqtSignal(int, Exception)
@@ -618,6 +708,8 @@ class RenamerGUI(QWidget):
         self.max_parallel_workers = 3
         self.stop_event = threading.Event()
         self.ui_ready = False
+        self.distribution_manager = DistributionManager(normalize_polish)
+        self.distribution_meta_cache: Dict[str, dict] = {}
 
         # Widgets used across the UI
         self.preview_value = QLabel("—")
@@ -647,14 +739,69 @@ class RenamerGUI(QWidget):
         self.tabs = QTabWidget()
         self.main_tab = QWidget()
         self.settings_tab = QWidget()
+        self.distribution_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.settings_tab, "AI Filename Settings")
+        self.tabs.addTab(self.distribution_tab, "Distribute PDFs to Case Folders")
         root_layout.addWidget(self.tabs)
 
         self.main_layout = QVBoxLayout()
         self.main_tab.setLayout(self.main_layout)
         self.settings_layout = QVBoxLayout()
         self.settings_tab.setLayout(self.settings_layout)
+        self.distribution_layout = QVBoxLayout()
+        self.distribution_tab.setLayout(self.distribution_layout)
+
+        # Distribution tab UI
+        dist_input_row = QHBoxLayout()
+        dist_input_row.addWidget(QLabel("Folder containing PDFs to distribute:"))
+        self.distribution_input_edit = QLineEdit()
+        dist_input_row.addWidget(self.distribution_input_edit)
+        self.distribution_input_button = QPushButton("Browse")
+        self.distribution_input_button.clicked.connect(self.choose_distribution_input)
+        dist_input_row.addWidget(self.distribution_input_button)
+        self.distribution_layout.addLayout(dist_input_row)
+
+        dist_cases_row = QHBoxLayout()
+        dist_cases_row.addWidget(QLabel("Case folders root:"))
+        self.case_root_edit = QLineEdit()
+        dist_cases_row.addWidget(self.case_root_edit)
+        self.case_root_button = QPushButton("Browse")
+        self.case_root_button.clicked.connect(self.choose_case_root)
+        dist_cases_row.addWidget(self.case_root_button)
+        self.distribution_layout.addLayout(dist_cases_row)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
+        self.copy_mode_checkbox.setChecked(True)
+        self.copy_mode_checkbox.setEnabled(False)
+        mode_row.addWidget(self.copy_mode_checkbox)
+        mode_row.addStretch()
+        self.distribution_layout.addLayout(mode_row)
+
+        dist_controls = QHBoxLayout()
+        self.distribution_status_label = QLabel("Idle")
+        dist_controls.addWidget(self.distribution_status_label)
+        dist_controls.addStretch()
+        self.distribution_progress = QProgressBar()
+        self.distribution_progress.setRange(0, 1)
+        self.distribution_progress.setValue(0)
+        self.distribution_progress.setTextVisible(True)
+        dist_controls.addWidget(self.distribution_progress)
+        self.distribute_button = QPushButton("Distribute")
+        self.distribute_button.clicked.connect(self.on_distribute_clicked)
+        dist_controls.addWidget(self.distribute_button)
+        self.distribution_layout.addLayout(dist_controls)
+
+        self.distribution_layout.addWidget(QLabel("Distribution log:"))
+        self.distribution_log_view = QTextEdit()
+        self.distribution_log_view.setReadOnly(True)
+        self.distribution_log_view.setPlaceholderText(
+            "Processing details will appear here. Copies are logged to disk as well."
+        )
+        self.distribution_log_view.setMinimumHeight(200)
+        self.distribution_layout.addWidget(self.distribution_log_view)
 
         # Input folder
         h1 = QHBoxLayout()
@@ -877,6 +1024,10 @@ class RenamerGUI(QWidget):
     def load_settings(self):
         self.input_edit.setText(self.settings.value("input_folder", ""))
         self.output_edit.setText(self.settings.value("output_folder", ""))
+        self.distribution_input_edit.setText(
+            self.settings.value("distribution_input_folder", self.settings.value("input_folder", ""))
+        )
+        self.case_root_edit.setText(self.settings.value("case_root_folder", ""))
         saved_template = self.settings.value("template", [])
         if isinstance(saved_template, str):
             saved_template = json.loads(saved_template) if saved_template else []
@@ -893,6 +1044,8 @@ class RenamerGUI(QWidget):
     def save_settings(self):
         self.settings.setValue("input_folder", self.input_edit.text())
         self.settings.setValue("output_folder", self.output_edit.text())
+        self.settings.setValue("distribution_input_folder", self.distribution_input_edit.text())
+        self.settings.setValue("case_root_folder", self.case_root_edit.text())
         self.settings.setValue("template", self.get_template_elements())
 
     def closeEvent(self, event):
@@ -927,6 +1080,26 @@ class RenamerGUI(QWidget):
         self.spinner_label.setText("")
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(False)
+
+    def start_distribution_ui(self, total: int):
+        self.distribute_button.setDisabled(True)
+        self.distribution_input_button.setDisabled(True)
+        self.case_root_button.setDisabled(True)
+        for btn in (self.play_button, self.btn_process, self.btn_all):
+            btn.setDisabled(True)
+        self.distribution_status_label.setText("Processing…")
+        self.distribution_progress.setRange(0, max(1, total))
+        self.distribution_progress.setValue(0)
+
+    def stop_distribution_ui(self, status: str = "Idle"):
+        self.distribute_button.setDisabled(False)
+        self.distribution_input_button.setDisabled(False)
+        self.case_root_button.setDisabled(False)
+        for btn in (self.play_button, self.btn_process, self.btn_all):
+            btn.setDisabled(False)
+        self.distribution_status_label.setText(status)
+        self.distribution_progress.setRange(0, 1)
+        self.distribution_progress.setValue(0)
 
     def check_ollama_status(self):
         if self.backend_combo.currentIndex() != 1:
@@ -979,6 +1152,41 @@ class RenamerGUI(QWidget):
                 traceback.format_exc(),
             )
 
+    def choose_distribution_input(self):
+        try:
+            folder = QFileDialog.getExistingDirectory(self, "Select PDF Folder to Distribute")
+            if not folder:
+                return
+            self.distribution_input_edit.setText(folder)
+        except Exception as e:
+            log_exception(e)
+            show_friendly_error(
+                self,
+                "Folder error",
+                "Renamer could not open the selected distribution input folder.",
+                traceback.format_exc(),
+            )
+
+    def choose_case_root(self):
+        try:
+            folder = QFileDialog.getExistingDirectory(self, "Select Case Folders Root")
+            if not folder:
+                return
+            self.case_root_edit.setText(folder)
+        except Exception as e:
+            log_exception(e)
+            show_friendly_error(
+                self,
+                "Folder error",
+                "Renamer could not open the selected case root folder.",
+                traceback.format_exc(),
+            )
+
+    def append_distribution_log_message(self, message: str):
+        if message:
+            self.distribution_log_view.append(message)
+            append_distribution_log(message)
+
     # ------------------------------------------------------
     # Load PDFs
     # ------------------------------------------------------
@@ -1023,6 +1231,191 @@ class RenamerGUI(QWidget):
             return
 
         self.file_table.selectRow(0)
+
+    # ------------------------------------------------------
+    # Distribution helpers
+    # ------------------------------------------------------
+
+    def parse_defendant_field(self, value) -> list[str]:
+        names: list[str] = []
+        if isinstance(value, str):
+            names = [part.strip() for part in value.split(",") if part.strip()]
+        elif isinstance(value, list):
+            names = [str(item).strip() for item in value if str(item).strip()]
+        cleaned: list[str] = []
+        for name in names:
+            if name.lower() == "defendant":
+                continue
+            if name not in cleaned:
+                cleaned.append(name)
+        return cleaned
+
+    def get_defendants_from_result(self, result: dict) -> list[str]:
+        source_meta = result.get("raw_meta") or result.get("meta") or {}
+        names = self.parse_defendant_field(source_meta.get("defendant"))
+        return names
+
+    def get_or_generate_distribution_result(self, pdf_path: str, filename: str) -> dict:
+        if pdf_path in self.distribution_meta_cache:
+            return self.distribution_meta_cache[pdf_path]
+
+        try:
+            if os.path.abspath(os.path.dirname(pdf_path)) == os.path.abspath(self.input_edit.text()):
+                if filename in self.pdf_files:
+                    idx = self.pdf_files.index(filename)
+                    cached = self.file_results.get(idx)
+                    if cached:
+                        result = {
+                            "meta": cached.get("meta", {}),
+                            "raw_meta": cached.get("meta", {}),
+                            "ocr_text": cached.get("ocr_text", ""),
+                        }
+                        self.distribution_meta_cache[pdf_path] = result
+                        return result
+        except Exception as e:
+            log_exception(e)
+
+        options = self.build_options()
+        requirements = requirements_from_template(options.template_elements)
+        self.log_activity(f"[Distribution] Running OCR/AI for '{filename}'")
+        ocr_text = ""
+        try:
+            if options.ocr_enabled:
+                ocr_text = extract_text_ocr(
+                    pdf_path,
+                    options.ocr_char_limit,
+                    options.ocr_dpi,
+                    options.ocr_pages,
+                )
+        except Exception as e:
+            log_exception(e)
+            ocr_text = ""
+
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend())
+        meta = apply_meta_defaults(ai_meta or {}, requirements)
+        result = {"meta": meta, "raw_meta": ai_meta or {}, "ocr_text": ocr_text}
+        self.distribution_meta_cache[pdf_path] = result
+        return result
+
+    def on_distribute_clicked(self):
+        input_dir = self.distribution_input_edit.text() or self.input_edit.text()
+        case_root = self.case_root_edit.text()
+
+        if not os.path.isdir(input_dir):
+            show_friendly_error(
+                self,
+                "Input folder unavailable",
+                "Renamer could not find the selected distribution input folder.",
+                f"Checked path: {input_dir}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        if not os.path.isdir(case_root):
+            show_friendly_error(
+                self,
+                "Case root unavailable",
+                "Renamer could not find the selected case root folder.",
+                f"Checked path: {case_root}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".pdf")]
+        if not pdf_files:
+            show_friendly_error(
+                self,
+                "No PDFs detected",
+                "Renamer did not find any PDF files to distribute.",
+                f"Looked in: {input_dir}",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
+
+        try:
+            case_index = self.distribution_manager.build_case_index(case_root)
+        except Exception as e:
+            log_exception(e)
+            show_friendly_error(
+                self,
+                "Case root error",
+                "Renamer could not read the case folders.",
+                traceback.format_exc(),
+            )
+            return
+
+        if not case_index:
+            show_friendly_error(
+                self,
+                "No case folders",
+                "Renamer did not find any case folders inside the selected root.",
+                f"Checked path: {case_root}",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
+
+        self.distribution_log_view.clear()
+        self.start_distribution_ui(len(pdf_files))
+        processed = 0
+
+        for pdf in pdf_files:
+            pdf_path = os.path.join(input_dir, pdf)
+            log_lines = [f"PDF: {pdf}"]
+            try:
+                result = self.get_or_generate_distribution_result(pdf_path, pdf)
+            except Exception as e:
+                log_exception(e)
+                log_lines.append("Status: error while extracting defendants")
+                self.append_distribution_log_message("\n".join(log_lines))
+                processed += 1
+                self.distribution_progress.setValue(processed)
+                continue
+
+            defendants = self.get_defendants_from_result(result)
+            if defendants:
+                log_lines.append(f"Defendants: {', '.join(defendants)}")
+                primary_defendant = defendants[0]
+            else:
+                log_lines.append("Defendants: none detected")
+                primary_defendant = "—"
+
+            self.distribution_status_label.setText(f"Processing {pdf} → {primary_defendant}")
+
+            matches: List[CaseFolderInfo] = []
+            if defendants:
+                try:
+                    matches = self.distribution_manager.find_matches(defendants, case_index)
+                except Exception as e:
+                    log_exception(e)
+
+            if matches:
+                log_lines.append("Matched folders:")
+                for match in matches:
+                    log_lines.append(f" - {os.path.basename(match.path)}")
+                if len(matches) > 1:
+                    log_lines.append("Note: multiple matches detected, copied to all.")
+                for match in matches:
+                    try:
+                        copied_name = self.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
+                        log_lines.append(
+                            f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
+                        )
+                    except Exception as e:
+                        log_exception(e)
+                        log_lines.append(
+                            f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
+                        )
+            else:
+                log_lines.append("Status: no matching case folder found")
+
+            self.append_distribution_log_message("\n".join(log_lines))
+            processed += 1
+            self.distribution_progress.setValue(processed)
+
+        self.distribution_status_label.setText("Finished")
+        self.distribution_progress.setValue(len(pdf_files))
+        self.stop_distribution_ui("Idle")
+        QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
 
     def get_ai_backend(self) -> str:
         idx = self.backend_combo.currentIndex()
