@@ -272,8 +272,8 @@ TESSDATA_DIR = configure_tesseract()
 # AI SYSTEM PROMPT — returns structured JSON
 # ==========================================================
 
-SYSTEM_PROMPT = """
-Return strict JSON in this exact shape:
+BASE_SYSTEM_PROMPT = """
+Return strict JSON in this exact shape (include every listed field):
 
 {
   "plaintiff": ["Given Surname", ...],
@@ -299,9 +299,28 @@ Rules:
 """
 
 
+def build_system_prompt(custom_elements: dict[str, str]) -> str:
+    extras = ""
+    if custom_elements:
+        extra_lines = [f'"{name}": "string"' for name in custom_elements]
+        extras = ",\n  " + ",\n  ".join(extra_lines)
+        details = "\n".join(
+            [f'- {name}: {desc or "Return a concise string"}' for name, desc in custom_elements.items()]
+        )
+        guidance = f"\nCustom fields to add (as strings):\n{details}\n"
+    else:
+        guidance = ""
+    return BASE_SYSTEM_PROMPT.replace(
+        "}",
+        f'{extras}\n}}',
+        1,
+    ) + guidance
+
+
 @dataclass
 class NamingOptions:
     template_elements: list[str]
+    custom_elements: dict[str, str]
     ocr_enabled: bool
     ocr_char_limit: int
     ocr_dpi: int
@@ -518,14 +537,14 @@ def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
     return text
 
 
-def call_openai_model(text: str) -> str:
+def call_openai_model(text: str, prompt: str) -> str:
     """Call OpenAI with fallback models, returning the raw content."""
 
     try:
         resp = client.chat.completions.create(
             model="gpt-5-nano",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": text},
             ],
         )
@@ -537,20 +556,20 @@ def call_openai_model(text: str) -> str:
         model="gpt-4.1-mini",
         temperature=0.0,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": text},
         ],
     )
     return resp.choices[0].message.content
 
 
-def call_ollama_model(text: str) -> str:
+def call_ollama_model(text: str, prompt: str) -> str:
     """Call a local Ollama model using the same system prompt."""
 
     try:
         payload = {
             "model": "qwen2.5:7b",
-            "prompt": f"{SYSTEM_PROMPT}\n\n{text}",
+            "prompt": f"{prompt}\n\n{text}",
             "stream": False,
         }
         resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
@@ -595,7 +614,7 @@ def parse_json_content(content: str, source: str) -> dict:
     return parsed
 
 
-def parse_ai_metadata(raw: str) -> dict:
+def parse_ai_metadata(raw: str, custom_keys: list[str]) -> dict:
     """Convert AI JSON into the meta structure expected by the app."""
 
     try:
@@ -636,17 +655,29 @@ def parse_ai_metadata(raw: str) -> dict:
     if isinstance(lt, str) and lt.strip():
         meta["letter_type"] = lt.strip()
 
+    case_numbers = data.get("case_numbers")
+    if isinstance(case_numbers, list) and case_numbers:
+        first_case = next((c for c in case_numbers if isinstance(c, str) and c.strip()), "")
+        if first_case:
+            meta["case_number"] = first_case.strip()
+
+    for key in custom_keys:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            meta[key] = val.strip()
+
     return meta
 
 
-def query_backend_for_meta(target: str, ocr_text: str) -> dict:
+def query_backend_for_meta(target: str, ocr_text: str, custom_elements: dict[str, str]) -> dict:
+    prompt = build_system_prompt(custom_elements)
     raw = ""
     try:
         if target == "ollama":
-            raw = call_ollama_model(ocr_text)
+            raw = call_ollama_model(ocr_text, prompt)
         else:
-            raw = call_openai_model(ocr_text)
-        meta = parse_ai_metadata(raw)
+            raw = call_openai_model(ocr_text, prompt)
+        meta = parse_ai_metadata(raw, list(custom_elements.keys()))
         if meta:
             log_info(f"AI metadata extracted using {target}")
             return meta
@@ -655,13 +686,13 @@ def query_backend_for_meta(target: str, ocr_text: str) -> dict:
     return {}
 
 
-def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], attempts_per_backend: int = 2) -> dict:
+def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], custom_elements: dict[str, str], attempts_per_backend: int = 2) -> dict:
     workers = max(1, len(backends) * attempts_per_backend)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {}
         for target in backends:
             for _ in range(attempts_per_backend):
-                future = executor.submit(query_backend_for_meta, target, ocr_text)
+                future = executor.submit(query_backend_for_meta, target, ocr_text, custom_elements)
                 future_map[future] = target
         for fut in as_completed(future_map):
             try:
@@ -677,7 +708,7 @@ def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], attempts_per_b
     return {}
 
 
-def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dict:
+def extract_metadata_ai(ocr_text: str, backend: str, custom_elements: dict[str, str], turbo: bool = False) -> dict:
     """Use AI backend to extract metadata; returns empty dict on failure."""
 
     if not ocr_text.strip():
@@ -685,7 +716,7 @@ def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dic
 
     if turbo:
         backends = ["ollama", "openai"]
-        meta = extract_metadata_ai_turbo(ocr_text, backends)
+        meta = extract_metadata_ai_turbo(ocr_text, backends, custom_elements)
         if meta:
             return meta
     else:
@@ -694,20 +725,24 @@ def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dic
             backends = ["ollama", "openai"]
 
     for target in backends:
-        meta = query_backend_for_meta(target, ocr_text)
+        meta = query_backend_for_meta(target, ocr_text, custom_elements)
         if meta:
             return meta
 
     return {}
 
 
-def requirements_from_template(template: list[str]) -> dict:
+def requirements_from_template(template: list[str], custom_elements: dict[str, str] | None = None) -> dict:
     requirements = {
         "plaintiff": True if "plaintiff" in template else False,
         "defendant": True if "defendant" in template else False,
         "letter_type": True if "letter_type" in template else False,
         "date": True if "date" in template else False,
+        "case_number": True if "case_number" in template else False,
     }
+    if custom_elements:
+        for key in custom_elements:
+            requirements[key] = True
     return requirements
 
 
@@ -721,6 +756,11 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("plaintiff", "Plaintiff")
     if requirements.get("defendant"):
         meta.setdefault("defendant", "Defendant")
+    if requirements.get("case_number"):
+        meta.setdefault("case_number", "Case-Number")
+    for key in requirements:
+        if key not in ("plaintiff", "defendant", "letter_type", "date", "case_number"):
+            meta.setdefault(key, key.replace("_", " ").title())
     return meta
 
 
@@ -842,7 +882,7 @@ class FileProcessWorker(QThread):
         self.options = options
         self.stop_event = stop_event
         self.backend = backend
-        self.requirements = requirements_from_template(options.template_elements)
+        self.requirements = requirements_from_template(options.template_elements, options.custom_elements)
 
     def run(self):
         try:
@@ -866,7 +906,7 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.turbo_mode)
+            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.custom_elements, self.options.turbo_mode)
             meta = ai_meta or {}
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
@@ -1042,12 +1082,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
         self.distribution_csv_log: str | None = None
-
-        # Widgets used across the UI
-        self.preview_value = QLineEdit("—")
-        self.preview_value.setReadOnly(True)
-        self.preview_value.setPlaceholderText("Preview generated filename")
-        self.preview_value.setMinimumHeight(26)
+        self.custom_elements: dict[str, str] = {}
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1232,12 +1267,6 @@ class RenamerGUI(QMainWindow):
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         name_col.addWidget(self.filename_edit)
         preview_layout.addLayout(name_col)
-
-        live_col = QVBoxLayout()
-        live_col.setSpacing(6)
-        live_col.addWidget(QLabel("Live preview:"))
-        live_col.addWidget(self.preview_value)
-        preview_layout.addLayout(live_col)
         preview_group.setLayout(preview_layout)
         self.main_layout.addWidget(preview_group)
 
@@ -1274,11 +1303,11 @@ class RenamerGUI(QMainWindow):
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(6)
         bottom_layout.setContentsMargins(12, 12, 12, 12)
-        btn_process = QPushButton("COMMIT FILE")
+        btn_process = QPushButton("EXECUTE ONE")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
 
-        btn_all = QPushButton("EXECUTE")
+        btn_all = QPushButton("EXECUTE ALL")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
@@ -1423,11 +1452,24 @@ class RenamerGUI(QMainWindow):
         self.template_selector.addItem("Plaintiff", "plaintiff")
         self.template_selector.addItem("Defendant", "defendant")
         self.template_selector.addItem("Letter type", "letter_type")
+        self.template_selector.addItem("Case number", "case_number")
         selector_row.addWidget(self.template_selector)
         add_template_btn = QPushButton("ADD ELEMENT")
         add_template_btn.clicked.connect(self.add_template_element)
         selector_row.addWidget(add_template_btn)
         selector_col.addLayout(selector_row)
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(6)
+        self.custom_name_edit = QLineEdit()
+        self.custom_name_edit.setPlaceholderText("Custom element key (e.g., reference)")
+        self.custom_desc_edit = QLineEdit()
+        self.custom_desc_edit.setPlaceholderText("AI guidance for this element")
+        custom_add_btn = QPushButton("ADD CUSTOM ELEMENT")
+        custom_add_btn.clicked.connect(self.add_custom_element_from_inputs)
+        custom_row.addWidget(self.custom_name_edit)
+        custom_row.addWidget(self.custom_desc_edit)
+        custom_row.addWidget(custom_add_btn)
+        selector_col.addLayout(custom_row)
         template_layout.addLayout(selector_col)
 
         template_builder = QHBoxLayout()
@@ -1595,6 +1637,12 @@ class RenamerGUI(QMainWindow):
         defendant_order_bool = str(defendant_order).lower() == "true"
         self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
         self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
+        saved_custom = self.settings.value("custom_elements", "{}")
+        try:
+            self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
+        except Exception:
+            self.custom_elements = {}
+        self.ensure_custom_selector_items()
         saved_template = self.settings.value("template", [])
         if isinstance(saved_template, str):
             saved_template = json.loads(saved_template) if saved_template else []
@@ -1615,6 +1663,7 @@ class RenamerGUI(QMainWindow):
         self.settings.setValue("case_root_folder", self.case_root_edit.text())
         self.settings.setValue("template", self.get_template_elements())
         self.settings.setValue("turbo_mode", self.turbo_mode_checkbox.isChecked())
+        self.settings.setValue("custom_elements", json.dumps(self.custom_elements))
         self.settings.setValue(
             "plaintiff_surname_first", bool(self.plaintiff_order_combo.currentData())
         )
@@ -1691,8 +1740,13 @@ class RenamerGUI(QMainWindow):
 
     def check_ollama_status(self):
         self.update_backend_status_label()
-        if self.backend_combo.currentIndex() != 1:
-            self.ollama_badge.setText("")
+        idx = self.backend_combo.currentIndex()
+        if idx != 1:
+            if idx == 0:
+                self.ollama_badge.setText("🌐 Cloud")
+            else:
+                self.ollama_badge.setText("⚙️ Auto")
+            self.ollama_badge.setStyleSheet("")
             return
         try:
             resp = requests.get(urljoin(OLLAMA_HOST, "api/tags"), timeout=2)
@@ -1890,7 +1944,7 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
 
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         self.log_activity(f"[Distribution] Running OCR/AI for '{filename}'")
         ocr_text = ""
         try:
@@ -1905,7 +1959,7 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
             ocr_text = ""
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
         meta = apply_meta_defaults(ai_meta or {}, requirements)
         meta = apply_party_order(meta, options)
         result = {"meta": meta, "raw_meta": ai_meta or {}, "ocr_text": ocr_text}
@@ -2009,6 +2063,7 @@ class RenamerGUI(QMainWindow):
     def build_options(self) -> NamingOptions:
         return NamingOptions(
             template_elements=self.get_template_elements(),
+            custom_elements=self.custom_elements,
             ocr_enabled=self.run_ocr_checkbox.isChecked(),
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
@@ -2024,6 +2079,7 @@ class RenamerGUI(QMainWindow):
             "plaintiff": "Plaintiff",
             "defendant": "Defendant",
             "letter_type": "Letter type",
+            "case_number": "Case number",
         }
         return mapping.get(element, element)
 
@@ -2034,11 +2090,29 @@ class RenamerGUI(QMainWindow):
         if refresh:
             self.update_preview()
 
+    def ensure_custom_selector_items(self):
+        existing = {self.template_selector.itemData(i) for i in range(self.template_selector.count())}
+        for key in self.custom_elements:
+            if key not in existing:
+                self.template_selector.addItem(f"Custom: {key}", key)
+
     def add_template_element(self):
         element = self.template_selector.currentData()
         if not element:
             return
         self.add_template_item(element)
+
+    def add_custom_element_from_inputs(self):
+        raw_name = (self.custom_name_edit.text() or "").strip()
+        desc = (self.custom_desc_edit.text() or "").strip()
+        key = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_name).strip("_").lower()
+        if not key:
+            self.append_status_message("[Template] Custom element name is required")
+            return
+        self.custom_elements[key] = desc
+        self.ensure_custom_selector_items()
+        self.add_template_item(key)
+        self.save_settings()
 
     def remove_selected_template_element(self):
         row = self.template_list.currentRow()
@@ -2088,12 +2162,10 @@ class RenamerGUI(QMainWindow):
         meta = self.meta or {}
         if self.current_index in self.file_results:
             meta = self.file_results[self.current_index].get("meta", meta)
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         meta = apply_meta_defaults(meta, requirements)
         meta = apply_party_order(meta, options)
         filename = build_filename(meta, options)
-        display_name = filename or "—"
-        self.preview_value.setText(display_name)
         if filename:
             self.filename_edit.blockSignals(True)
             self.filename_edit.setText(filename)
@@ -2393,7 +2465,7 @@ class RenamerGUI(QMainWindow):
         global AI_BACKEND
         AI_BACKEND = self.get_ai_backend()
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         self.log_activity(
             f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
             f"char_limit={options.ocr_char_limit}, backend={AI_BACKEND})"
@@ -2412,7 +2484,7 @@ class RenamerGUI(QMainWindow):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
         meta = ai_meta or {}
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
