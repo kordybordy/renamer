@@ -777,6 +777,13 @@ def format_party_field(value, surname_first: bool) -> str:
     return ", ".join(formatted)
 
 
+def defendant_from_filename(filename: str) -> str:
+    base = os.path.splitext(os.path.basename(filename))[0]
+    cleaned = re.sub(r"[_\\-]+", " ", base)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def apply_party_order(meta: dict, options: NamingOptions) -> dict:
     meta = meta.copy()
     if "plaintiff" in meta:
@@ -906,12 +913,15 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.custom_elements, self.options.turbo_mode)
-            meta = ai_meta or {}
+            raw_meta = extract_metadata_ai(ocr_text, self.backend, self.options.custom_elements, self.options.turbo_mode) or {}
+            if not raw_meta.get("defendant"):
+                fallback_defendant = defendant_from_filename(self.pdf_path)
+                if fallback_defendant:
+                    raw_meta["defendant"] = fallback_defendant
             defaults_applied = [
-                key for key in self.requirements if key not in meta or not meta.get(key)
+                key for key in self.requirements if key not in raw_meta or not raw_meta.get(key)
             ]
-            meta = apply_meta_defaults(meta, self.requirements)
+            meta = apply_meta_defaults(raw_meta, self.requirements)
             meta = apply_party_order(meta, self.options)
 
             if defaults_applied:
@@ -933,6 +943,7 @@ class FileProcessWorker(QThread):
                 {
                     "ocr_text": ocr_text,
                     "meta": meta,
+                    "raw_meta": raw_meta,
                     "filename": filename,
                     "char_count": len(ocr_text),
                 },
@@ -1935,7 +1946,7 @@ class RenamerGUI(QMainWindow):
                     if cached:
                         result = {
                             "meta": cached.get("meta", {}),
-                            "raw_meta": cached.get("meta", {}),
+                            "raw_meta": cached.get("raw_meta", cached.get("meta", {})),
                             "ocr_text": cached.get("ocr_text", ""),
                         }
                         self.distribution_meta_cache[pdf_path] = result
@@ -1959,10 +1970,14 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
             ocr_text = ""
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
-        meta = apply_meta_defaults(ai_meta or {}, requirements)
+        raw_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode) or {}
+        if not raw_meta.get("defendant"):
+            fallback_defendant = defendant_from_filename(filename)
+            if fallback_defendant:
+                raw_meta["defendant"] = fallback_defendant
+        meta = apply_meta_defaults(raw_meta, requirements)
         meta = apply_party_order(meta, options)
-        result = {"meta": meta, "raw_meta": ai_meta or {}, "ocr_text": ocr_text}
+        result = {"meta": meta, "raw_meta": raw_meta, "ocr_text": ocr_text}
         self.distribution_meta_cache[pdf_path] = result
         return result
 
@@ -2484,10 +2499,13 @@ class RenamerGUI(QMainWindow):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode)
-        meta = ai_meta or {}
-        defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
-        meta = apply_meta_defaults(meta, requirements)
+        raw_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode) or {}
+        if not raw_meta.get("defendant"):
+            fallback_defendant = defendant_from_filename(pdf)
+            if fallback_defendant:
+                raw_meta["defendant"] = fallback_defendant
+        defaults_applied = [key for key in requirements if key not in raw_meta or not raw_meta.get(key)]
+        meta = apply_meta_defaults(raw_meta, requirements)
         meta = apply_party_order(meta, options)
 
         if defaults_applied:
@@ -2503,6 +2521,7 @@ class RenamerGUI(QMainWindow):
         return {
             "ocr_text": ocr_text,
             "meta": meta,
+            "raw_meta": raw_meta,
             "filename": filename,
             "char_count": len(ocr_text),
         }
