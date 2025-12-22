@@ -44,7 +44,7 @@ client = OpenAI(api_key=API_KEY)
 
 FILENAME_RULES = {
     "remove_raiffeisen": True,        # always remove Raiffeisen from parties
-    "max_parties": 3,                 # limit number of names in filename
+    "max_parties": 5,                 # limit number of names in filename
     "primary_party_only": True,       # keep only the first detected party per side
     "person_token_limit": 2,          # keep only first two tokens for a single party entry
     "surname_first": True,            # SURNAME Name
