@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import glob
 import threading
+import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urljoin
@@ -26,9 +27,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
     QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
-    QStatusBar, QAbstractItemView, QStackedWidget, QFrame
+    QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
+    QButtonGroup, QPlainTextEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QSettings
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
@@ -880,9 +882,6 @@ class FileProcessWorker(QThread):
                 f"[Worker {self.index + 1}] Extracted meta: {json.dumps(meta, ensure_ascii=False)}"
             )
 
-            if self.stop_event.is_set():
-                return
-
             filename = build_filename(meta, self.options)
 
             log_info(
@@ -908,17 +907,26 @@ class DistributionWorker(QThread):
     log_ready = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, gui_ref, input_dir: str, pdf_files: List[str], case_index: List[CaseFolderInfo]):
+    def __init__(
+        self,
+        gui_ref,
+        input_dir: str,
+        pdf_files: List[str],
+        case_index: List[CaseFolderInfo],
+        csv_log_path: str | None = None,
+    ):
         super().__init__()
         self.gui_ref = gui_ref
         self.input_dir = input_dir
         self.pdf_files = pdf_files
         self.case_index = case_index
+        self.csv_log_path = csv_log_path
 
     def run(self):
         processed = 0
         total = len(self.pdf_files)
         try:
+            csv_entries: list[tuple[str, str, str]] = []
             for pdf in self.pdf_files:
                 pdf_path = os.path.join(self.input_dir, pdf)
                 status_text = f"Processing {pdf}"
@@ -966,6 +974,9 @@ class DistributionWorker(QThread):
                     for match in matches:
                         try:
                             copied_name = self.gui_ref.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
+                            csv_entries.append(
+                                (pdf, "copied", os.path.join(match.path, copied_name))
+                            )
                             log_lines.append(
                                 f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
                             )
@@ -973,6 +984,9 @@ class DistributionWorker(QThread):
                             log_exception(e)
                             log_lines.append(
                                 f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
+                            )
+                            csv_entries.append(
+                                (pdf, "copy_failed", f"{os.path.basename(match.path)}: {e}")
                             )
                 else:
                     candidate_surnames = [
@@ -983,10 +997,21 @@ class DistributionWorker(QThread):
                     log_lines.append(
                         f"Status: no matching case folder found (checked {len(self.case_index)} folders; surnames tried={candidate_surnames})"
                     )
+                    csv_entries.append((pdf, "no_match", ""))
 
                 self.log_ready.emit("\n".join(log_lines))
                 processed += 1
                 self.progress.emit(processed, total, status_text)
+            if self.csv_log_path:
+                try:
+                    os.makedirs(os.path.dirname(self.csv_log_path), exist_ok=True)
+                    with open(self.csv_log_path, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["file", "status", "target_or_error"])
+                        writer.writerows(csv_entries)
+                except Exception as e:
+                    log_exception(e)
+                    self.log_ready.emit(f"Failed to write CSV log: {e}")
         except Exception as e:
             log_exception(e)
             self.log_ready.emit(f"Unexpected error during distribution: {e}")
@@ -1016,6 +1041,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_manager = DistributionManager(normalize_polish)
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
+        self.distribution_csv_log: str | None = None
 
         # Widgets used across the UI
         self.preview_value = QLineEdit("—")
@@ -1026,18 +1052,65 @@ class RenamerGUI(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        root_layout = QHBoxLayout()
-        root_layout.setContentsMargins(12, 12, 12, 12)
-        root_layout.setSpacing(12)
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(16)
         central_widget.setLayout(root_layout)
 
-        self.sidebar = QListWidget()
-        self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(210)
-        self.sidebar.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        for name in ("Main", "AI Filename Settings", "Distribute PDFs"):
-            QListWidgetItem(name, self.sidebar)
-        root_layout.addWidget(self.sidebar)
+        header_frame = QFrame()
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(8, 8, 8, 8)
+        header_layout.setSpacing(8)
+        logo_path = None
+        for candidate in ("logo-32.png", "logo-square.png", "logo.png"):
+            candidate_path = os.path.join(BASE_DIR, "assets", candidate)
+            if os.path.exists(candidate_path):
+                logo_path = candidate_path
+                break
+        pixmap = QPixmap(logo_path) if logo_path else QPixmap()
+        if not pixmap.isNull():
+            logo_label = QLabel()
+            logo_label.setPixmap(
+                pixmap.scaled(QSize(32, 32), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+            header_layout.addWidget(logo_label)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(8)
+        title_label = QLabel("[R] Renamer")
+        title_label.setObjectName("Title")
+        subtitle_label = QLabel("Smart document naming")
+        subtitle_label.setObjectName("Subtitle")
+        title_col.addWidget(title_label)
+        title_col.addWidget(subtitle_label)
+        header_layout.addLayout(title_col)
+        header_layout.addStretch()
+        header_frame.setLayout(header_layout)
+        root_layout.addWidget(header_frame)
+
+        mode_bar = QFrame()
+        mode_bar_layout = QHBoxLayout()
+        mode_bar_layout.setContentsMargins(0, 0, 0, 0)
+        mode_bar_layout.setSpacing(8)
+        self.mode_buttons = QButtonGroup(self)
+        self.mode_buttons.setExclusive(True)
+        self.mode_buttons.idClicked.connect(self.on_mode_changed)
+
+        self.rename_mode_button = QPushButton("RENAME")
+        self.rename_mode_button.setCheckable(True)
+        self.filename_mode_button = QPushButton("FILENAME RULES")
+        self.filename_mode_button.setCheckable(True)
+        self.distribute_mode_button = QPushButton("DISTRIBUTE")
+        self.distribute_mode_button.setCheckable(True)
+
+        for idx, btn in enumerate(
+            (self.rename_mode_button, self.filename_mode_button, self.distribute_mode_button)
+        ):
+            btn.setObjectName("ModeButton")
+            self.mode_buttons.addButton(btn, idx)
+            mode_bar_layout.addWidget(btn)
+        mode_bar_layout.addStretch()
+        mode_bar.setLayout(mode_bar_layout)
+        root_layout.addWidget(mode_bar)
 
         self.content_stack = QStackedWidget()
         root_layout.addWidget(self.content_stack, 1)
@@ -1048,72 +1121,68 @@ class RenamerGUI(QMainWindow):
         self.content_stack.addWidget(self.main_page)
         self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.distribution_page)
-        self.sidebar.currentRowChanged.connect(self.on_sidebar_changed)
 
         # Main page (Page 0)
         self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(12)
+        self.main_layout.setSpacing(16)
         self.main_page.setLayout(self.main_layout)
 
-        header_frame = QFrame()
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(12, 12, 12, 12)
-        logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
-        pixmap = QPixmap(logo_path)
-        if not pixmap.isNull():
-            logo_label = QLabel()
-            logo_label.setPixmap(
-                pixmap.scaled(QSize(48, 48), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            )
-            header_layout.addWidget(logo_label)
-        title_col = QVBoxLayout()
-        title_label = QLabel("Renamer")
-        title_label.setObjectName("Title")
-        subtitle_label = QLabel("Smart document naming")
-        subtitle_label.setObjectName("Subtitle")
-        title_col.addWidget(title_label)
-        title_col.addWidget(subtitle_label)
-        header_layout.addLayout(title_col)
-        header_layout.addStretch()
-        header_frame.setLayout(header_layout)
-        self.main_layout.addWidget(header_frame)
-
-        io_frame = QFrame()
+        io_group = QGroupBox("PATHS")
         io_layout = QVBoxLayout()
-        input_row = QHBoxLayout()
-        input_row.addWidget(QLabel("Input folder:"))
+        io_layout.setSpacing(8)
+        io_layout.setContentsMargins(16, 16, 16, 16)
+        input_col = QVBoxLayout()
+        input_col.setSpacing(8)
+        input_label = QLabel("Input folder:")
+        input_col.addWidget(input_label)
         self.input_edit = QLineEdit()
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
         input_row.addWidget(self.input_edit)
-        btn_input = QPushButton("Browse")
+        btn_input = QPushButton("BROWSE")
         btn_input.clicked.connect(self.choose_input)
         input_row.addWidget(btn_input)
-        io_layout.addLayout(input_row)
+        input_col.addLayout(input_row)
+        io_layout.addLayout(input_col)
 
-        output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("Output folder:"))
+        output_col = QVBoxLayout()
+        output_col.setSpacing(8)
+        output_col.addWidget(QLabel("Output folder:"))
         self.output_edit = QLineEdit()
+        output_row = QHBoxLayout()
+        output_row.setSpacing(8)
         output_row.addWidget(self.output_edit)
-        btn_output = QPushButton("Browse")
+        btn_output = QPushButton("BROWSE")
         btn_output.clicked.connect(self.choose_output)
         output_row.addWidget(btn_output)
-        io_layout.addLayout(output_row)
-        io_frame.setLayout(io_layout)
-        self.main_layout.addWidget(io_frame)
+        output_col.addLayout(output_row)
+        io_layout.addLayout(output_col)
+        io_group.setLayout(io_layout)
+        self.main_layout.addWidget(io_group)
 
-        action_frame = QFrame()
+        action_group = QGroupBox("COMMAND")
         action_layout = QHBoxLayout()
+        action_layout.setSpacing(8)
+        action_layout.setContentsMargins(16, 16, 16, 16)
         action_layout.addStretch()
-        self.play_button = QPushButton("▶ Generate proposals")
+        self.play_button = QPushButton("SCAN")
         self.play_button.setObjectName("Primary")
         self.play_button.clicked.connect(self.start_processing_clicked)
         action_layout.addWidget(self.play_button)
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.clicked.connect(self.stop_generation)
+        action_layout.addWidget(self.stop_button)
+        self.reset_button = QPushButton("RESET")
+        self.reset_button.clicked.connect(self.stop_and_reprocess)
+        action_layout.addWidget(self.reset_button)
         action_layout.addStretch()
-        action_frame.setLayout(action_layout)
-        self.main_layout.addWidget(action_frame)
+        action_group.setLayout(action_layout)
+        self.main_layout.addWidget(action_group)
 
-        table_frame = QFrame()
+        table_group = QGroupBox("FILES")
         table_layout = QVBoxLayout()
-        table_layout.addWidget(QLabel("Files and proposed names:"))
+        table_layout.setSpacing(8)
+        table_layout.setContentsMargins(16, 16, 16, 16)
         self.file_table = QTableWidget(0, 2)
         self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1123,28 +1192,33 @@ class RenamerGUI(QMainWindow):
         self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
         self.file_table.cellClicked.connect(self.on_row_selected)
         table_layout.addWidget(self.file_table)
-        table_frame.setLayout(table_layout)
-        self.main_layout.addWidget(table_frame)
+        table_group.setLayout(table_layout)
+        self.main_layout.addWidget(table_group)
 
-        preview_frame = QFrame()
+        preview_group = QGroupBox("FILENAME")
         preview_layout = QVBoxLayout()
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Proposed filename:"))
+        preview_layout.setSpacing(8)
+        preview_layout.setContentsMargins(16, 16, 16, 16)
+        name_col = QVBoxLayout()
+        name_col.setSpacing(8)
+        name_col.addWidget(QLabel("Proposed filename:"))
         self.filename_edit = QLineEdit()
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
-        name_row.addWidget(self.filename_edit)
-        preview_layout.addLayout(name_row)
+        name_col.addWidget(self.filename_edit)
+        preview_layout.addLayout(name_col)
 
-        live_row = QHBoxLayout()
-        live_label = QLabel("Live preview:")
-        live_row.addWidget(live_label)
-        live_row.addWidget(self.preview_value)
-        preview_layout.addLayout(live_row)
-        preview_frame.setLayout(preview_layout)
-        self.main_layout.addWidget(preview_frame)
+        live_col = QVBoxLayout()
+        live_col.setSpacing(8)
+        live_col.addWidget(QLabel("Live preview:"))
+        live_col.addWidget(self.preview_value)
+        preview_layout.addLayout(live_col)
+        preview_group.setLayout(preview_layout)
+        self.main_layout.addWidget(preview_group)
 
-        ocr_frame = QFrame()
+        ocr_group = QGroupBox("OCR EXCERPT")
         ocr_layout = QVBoxLayout()
+        ocr_layout.setSpacing(8)
+        ocr_layout.setContentsMargins(16, 16, 16, 16)
         self.ocr_preview_label = QLabel("OCR text sent to AI:")
         self.ocr_preview = QTextEdit()
         self.ocr_preview.setReadOnly(True)
@@ -1154,85 +1228,105 @@ class RenamerGUI(QMainWindow):
         self.ocr_preview.setMinimumHeight(140)
         ocr_layout.addWidget(self.ocr_preview_label)
         ocr_layout.addWidget(self.ocr_preview)
-        ocr_frame.setLayout(ocr_layout)
-        self.main_layout.addWidget(ocr_frame)
+        ocr_group.setLayout(ocr_layout)
+        self.main_layout.addWidget(ocr_group)
 
-        bottom_frame = QFrame()
+        log_group = QGroupBox("STATUS LOG")
+        log_layout = QVBoxLayout()
+        log_layout.setSpacing(8)
+        log_layout.setContentsMargins(16, 16, 16, 16)
+        self.status_log = QPlainTextEdit()
+        self.status_log.setReadOnly(True)
+        self.status_log.setPlaceholderText("[hh:mm:ss] status messages appear here")
+        self.status_log.setMinimumHeight(140)
+        log_layout.addWidget(self.status_log)
+        log_group.setLayout(log_layout)
+        self.main_layout.addWidget(log_group)
+
+        bottom_group = QGroupBox("ACTIONS")
         bottom_layout = QHBoxLayout()
-        btn_process = QPushButton("✎ Rename File")
+        bottom_layout.setSpacing(8)
+        bottom_layout.setContentsMargins(16, 16, 16, 16)
+        btn_process = QPushButton("COMMIT FILE")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
 
-        btn_all = QPushButton("⏩ Rename All")
+        btn_all = QPushButton("EXECUTE")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
-        btn_quit = QPushButton("Quit")
-        btn_quit.clicked.connect(self.close)
-
         bottom_layout.addWidget(btn_process)
         bottom_layout.addWidget(btn_all)
-        bottom_layout.addWidget(btn_quit)
-        bottom_frame.setLayout(bottom_layout)
-        self.main_layout.addWidget(bottom_frame)
+        bottom_layout.addStretch()
+        bottom_group.setLayout(bottom_layout)
+        self.main_layout.addWidget(bottom_group)
 
-        copyright_label = QLabel("Copyright 2025-2026 Przemek1337 all rights reserved")
+        copyright_label = QLabel("────────────────────")
         copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_layout.addWidget(copyright_label)
 
         # Settings page (Page 1)
         self.settings_layout = QHBoxLayout()
-        self.settings_layout.setSpacing(12)
+        self.settings_layout.setSpacing(16)
         self.settings_page.setLayout(self.settings_layout)
 
-        controls_frame = QFrame()
+        controls_group = QGroupBox("AI + OCR")
         controls_layout = QVBoxLayout()
-        controls_layout.setSpacing(10)
+        controls_layout.setSpacing(16)
+        controls_layout.setContentsMargins(16, 16, 16, 16)
 
-        ocr_group = QFrame()
+        ocr_group = QGroupBox("OCR SETTINGS")
         ocr_layout = QVBoxLayout()
+        ocr_layout.setSpacing(8)
         self.run_ocr_checkbox = QCheckBox("Run OCR")
         self.run_ocr_checkbox.setChecked(True)
         self.run_ocr_checkbox.toggled.connect(self.update_preview)
         ocr_layout.addWidget(self.run_ocr_checkbox)
 
-        char_row = QHBoxLayout()
-        char_row.addWidget(QLabel("Max characters:"))
+        char_col = QVBoxLayout()
+        char_col.setSpacing(8)
+        char_col.addWidget(QLabel("Max characters:"))
         self.char_limit_spin = QSpinBox()
         self.char_limit_spin.setRange(100, 10000)
         self.char_limit_spin.setSingleStep(100)
         self.char_limit_spin.setValue(1500)
         self.char_limit_spin.valueChanged.connect(self.update_preview)
-        char_row.addWidget(self.char_limit_spin)
-        ocr_layout.addLayout(char_row)
+        char_col.addWidget(self.char_limit_spin)
+        ocr_layout.addLayout(char_col)
 
-        dpi_row = QHBoxLayout()
-        dpi_row.addWidget(QLabel("OCR DPI:"))
+        dpi_col = QVBoxLayout()
+        dpi_col.setSpacing(8)
+        dpi_col.addWidget(QLabel("OCR DPI:"))
         self.ocr_dpi_spin = QSpinBox()
         self.ocr_dpi_spin.setRange(72, 600)
         self.ocr_dpi_spin.setValue(300)
         self.ocr_dpi_spin.valueChanged.connect(self.update_preview)
-        dpi_row.addWidget(self.ocr_dpi_spin)
-        ocr_layout.addLayout(dpi_row)
+        dpi_col.addWidget(self.ocr_dpi_spin)
+        ocr_layout.addLayout(dpi_col)
 
-        pages_row = QHBoxLayout()
-        pages_row.addWidget(QLabel("Pages to scan:"))
+        pages_col = QVBoxLayout()
+        pages_col.setSpacing(8)
+        pages_col.addWidget(QLabel("Pages to scan:"))
         self.ocr_pages_spin = QSpinBox()
         self.ocr_pages_spin.setRange(1, 50)
         self.ocr_pages_spin.setValue(1)
         self.ocr_pages_spin.valueChanged.connect(self.update_preview)
-        pages_row.addWidget(self.ocr_pages_spin)
-        ocr_layout.addLayout(pages_row)
+        pages_col.addWidget(self.ocr_pages_spin)
+        ocr_layout.addLayout(pages_col)
 
         self.char_count_label = QLabel("Characters retrieved: 0")
         ocr_layout.addWidget(self.char_count_label)
         ocr_group.setLayout(ocr_layout)
         controls_layout.addWidget(ocr_group)
 
-        ai_group = QFrame()
+        ai_group = QGroupBox("AI ENGINE")
         ai_layout = QVBoxLayout()
+        ai_layout.setSpacing(8)
+        backend_col = QVBoxLayout()
+        backend_col.setSpacing(8)
+        backend_col.addWidget(QLabel("Engine:"))
         backend_row = QHBoxLayout()
-        backend_row.addWidget(QLabel("AI Engine:"))
+        backend_row.setSpacing(8)
         self.backend_combo = QComboBox()
         self.backend_combo.addItems([
             "OpenAI (cloud)",
@@ -1246,56 +1340,71 @@ class RenamerGUI(QMainWindow):
         self.ollama_badge = QLabel("")
         backend_row.addWidget(self.ollama_badge)
         backend_row.addStretch()
-        ai_layout.addLayout(backend_row)
+        backend_col.addLayout(backend_row)
+        ai_layout.addLayout(backend_col)
 
-        turbo_row = QHBoxLayout()
+        turbo_col = QVBoxLayout()
+        turbo_col.setSpacing(8)
+        turbo_col.addWidget(QLabel("Parallelism:"))
         self.turbo_mode_checkbox = QCheckBox("Turbo mode (parallel AI queries)")
         self.turbo_mode_checkbox.setToolTip("Send a couple of requests to each backend and keep the first valid answer.")
-        turbo_row.addWidget(self.turbo_mode_checkbox)
-        turbo_row.addStretch()
-        ai_layout.addLayout(turbo_row)
+        turbo_col.addWidget(self.turbo_mode_checkbox)
+        ai_layout.addLayout(turbo_col)
         ai_group.setLayout(ai_layout)
         controls_layout.addWidget(ai_group)
 
-        order_group = QFrame()
-        order_layout = QHBoxLayout()
-        order_layout.addWidget(QLabel("Plaintiff order:"))
+        order_group = QGroupBox("NAME ORDER")
+        order_layout = QVBoxLayout()
+        order_layout.setSpacing(8)
+        plaintiff_col = QVBoxLayout()
+        plaintiff_col.setSpacing(8)
+        plaintiff_col.addWidget(QLabel("Plaintiff order:"))
         self.plaintiff_order_combo = QComboBox()
         self.plaintiff_order_combo.addItem("Surname Name", True)
         self.plaintiff_order_combo.addItem("Name Surname", False)
         self.plaintiff_order_combo.currentIndexChanged.connect(self.update_preview)
-        order_layout.addWidget(self.plaintiff_order_combo)
+        plaintiff_col.addWidget(self.plaintiff_order_combo)
+        order_layout.addLayout(plaintiff_col)
 
-        order_layout.addWidget(QLabel("Defendant order:"))
+        defendant_col = QVBoxLayout()
+        defendant_col.setSpacing(8)
+        defendant_col.addWidget(QLabel("Defendant order:"))
         self.defendant_order_combo = QComboBox()
         self.defendant_order_combo.addItem("Surname Name", True)
         self.defendant_order_combo.addItem("Name Surname", False)
         self.defendant_order_combo.currentIndexChanged.connect(self.update_preview)
-        order_layout.addWidget(self.defendant_order_combo)
-        order_layout.addStretch()
+        defendant_col.addWidget(self.defendant_order_combo)
+        order_layout.addLayout(defendant_col)
         order_group.setLayout(order_layout)
         controls_layout.addWidget(order_group)
         controls_layout.addStretch()
-        controls_frame.setLayout(controls_layout)
-        self.settings_layout.addWidget(controls_frame, 1)
+        controls_group.setLayout(controls_layout)
+        self.settings_layout.addWidget(controls_group, 1)
 
-        template_frame = QFrame()
+        template_group = QGroupBox("FILENAME TEMPLATE")
         template_layout = QVBoxLayout()
-        template_layout.addWidget(QLabel("Filename template"))
+        template_layout.setSpacing(8)
+        template_layout.setContentsMargins(16, 16, 16, 16)
 
+        selector_col = QVBoxLayout()
+        selector_col.setSpacing(8)
+        selector_col.addWidget(QLabel("Add element:"))
         selector_row = QHBoxLayout()
+        selector_row.setSpacing(8)
         self.template_selector = QComboBox()
         self.template_selector.addItem("Date (today)", "date")
         self.template_selector.addItem("Plaintiff", "plaintiff")
         self.template_selector.addItem("Defendant", "defendant")
         self.template_selector.addItem("Letter type", "letter_type")
         selector_row.addWidget(self.template_selector)
-        add_template_btn = QPushButton("Add element")
+        add_template_btn = QPushButton("ADD ELEMENT")
         add_template_btn.clicked.connect(self.add_template_element)
         selector_row.addWidget(add_template_btn)
-        template_layout.addLayout(selector_row)
+        selector_col.addLayout(selector_row)
+        template_layout.addLayout(selector_col)
 
         template_builder = QHBoxLayout()
+        template_builder.setSpacing(8)
         self.template_list = QListWidget()
         self.template_list.setSelectionMode(
             self.template_list.SelectionMode.SingleSelection
@@ -1309,55 +1418,68 @@ class RenamerGUI(QMainWindow):
         template_builder.addWidget(self.template_list)
 
         buttons_col = QVBoxLayout()
-        remove_btn = QPushButton("Remove")
+        buttons_col.setSpacing(8)
+        remove_btn = QPushButton("REMOVE")
         remove_btn.clicked.connect(self.remove_selected_template_element)
         buttons_col.addWidget(remove_btn)
         buttons_col.addStretch()
         template_builder.addLayout(buttons_col)
 
         template_layout.addLayout(template_builder)
-        template_frame.setLayout(template_layout)
-        self.settings_layout.addWidget(template_frame, 1)
+        template_group.setLayout(template_layout)
+        self.settings_layout.addWidget(template_group, 1)
 
         # Distribution page (Page 2)
         self.distribution_layout = QVBoxLayout()
-        self.distribution_layout.setSpacing(12)
+        self.distribution_layout.setSpacing(16)
         self.distribution_page.setLayout(self.distribution_layout)
 
-        dist_frame = QFrame()
+        dist_paths_group = QGroupBox("DISTRIBUTION PATHS")
         dist_frame_layout = QVBoxLayout()
+        dist_frame_layout.setSpacing(8)
+        dist_frame_layout.setContentsMargins(16, 16, 16, 16)
+        dist_input_col = QVBoxLayout()
+        dist_input_col.setSpacing(8)
+        dist_input_col.addWidget(QLabel("Folder containing PDFs to distribute:"))
         dist_input_row = QHBoxLayout()
-        dist_input_row.addWidget(QLabel("Folder containing PDFs to distribute:"))
+        dist_input_row.setSpacing(8)
         self.distribution_input_edit = QLineEdit()
         dist_input_row.addWidget(self.distribution_input_edit)
-        self.distribution_input_button = QPushButton("Browse")
+        self.distribution_input_button = QPushButton("BROWSE")
         self.distribution_input_button.clicked.connect(self.choose_distribution_input)
         dist_input_row.addWidget(self.distribution_input_button)
-        dist_frame_layout.addLayout(dist_input_row)
+        dist_input_col.addLayout(dist_input_row)
+        dist_frame_layout.addLayout(dist_input_col)
 
+        dist_cases_col = QVBoxLayout()
+        dist_cases_col.setSpacing(8)
+        dist_cases_col.addWidget(QLabel("Case folders root:"))
         dist_cases_row = QHBoxLayout()
-        dist_cases_row.addWidget(QLabel("Case folders root:"))
+        dist_cases_row.setSpacing(8)
         self.case_root_edit = QLineEdit()
         dist_cases_row.addWidget(self.case_root_edit)
-        self.case_root_button = QPushButton("Browse")
+        self.case_root_button = QPushButton("BROWSE")
         self.case_root_button.clicked.connect(self.choose_case_root)
         dist_cases_row.addWidget(self.case_root_button)
-        dist_frame_layout.addLayout(dist_cases_row)
-        dist_frame.setLayout(dist_frame_layout)
-        self.distribution_layout.addWidget(dist_frame)
+        dist_cases_col.addLayout(dist_cases_row)
+        dist_frame_layout.addLayout(dist_cases_col)
+        dist_paths_group.setLayout(dist_frame_layout)
+        self.distribution_layout.addWidget(dist_paths_group)
 
-        mode_frame = QFrame()
+        mode_group = QGroupBox("MODE")
         mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
         self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
         self.copy_mode_checkbox.setChecked(True)
         self.copy_mode_checkbox.setEnabled(False)
         mode_row.addWidget(self.copy_mode_checkbox)
         mode_row.addStretch()
-        mode_frame.setLayout(mode_row)
-        self.distribution_layout.addWidget(mode_frame)
+        mode_group.setLayout(mode_row)
+        self.distribution_layout.addWidget(mode_group)
 
-        dist_controls_frame = QFrame()
+        dist_controls_group = QGroupBox("EXECUTION")
         dist_controls = QHBoxLayout()
+        dist_controls.setSpacing(8)
         self.distribution_status_label = QLabel("Idle")
         dist_controls.addWidget(self.distribution_status_label)
         dist_controls.addStretch()
@@ -1366,16 +1488,17 @@ class RenamerGUI(QMainWindow):
         self.distribution_progress.setValue(0)
         self.distribution_progress.setTextVisible(True)
         dist_controls.addWidget(self.distribution_progress)
-        self.distribute_button = QPushButton("▶ Distribute")
+        self.distribute_button = QPushButton("EXECUTE DISTRIBUTION")
         self.distribute_button.setObjectName("Primary")
         self.distribute_button.clicked.connect(self.on_distribute_clicked)
         dist_controls.addWidget(self.distribute_button)
-        dist_controls_frame.setLayout(dist_controls)
-        self.distribution_layout.addWidget(dist_controls_frame)
+        dist_controls_group.setLayout(dist_controls)
+        self.distribution_layout.addWidget(dist_controls_group)
 
-        log_frame = QFrame()
+        log_group = QGroupBox("DISTRIBUTION LOG")
         log_layout = QVBoxLayout()
-        log_layout.addWidget(QLabel("Distribution log:"))
+        log_layout.setSpacing(8)
+        log_layout.setContentsMargins(16, 16, 16, 16)
         self.distribution_log_view = QTextEdit()
         self.distribution_log_view.setReadOnly(True)
         self.distribution_log_view.setPlaceholderText(
@@ -1383,37 +1506,29 @@ class RenamerGUI(QMainWindow):
         )
         self.distribution_log_view.setMinimumHeight(200)
         log_layout.addWidget(self.distribution_log_view)
-        log_frame.setLayout(log_layout)
-        self.distribution_layout.addWidget(log_frame)
+        log_group.setLayout(log_layout)
+        self.distribution_layout.addWidget(log_group)
 
         # Status bar
         self.status_bar = QStatusBar()
         self.status_label = QLabel("Waiting for input…")
         self.backend_status_label = QLabel("")
-        self.spinner_label = QLabel("")
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
         status_widget = QWidget()
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.addWidget(self.spinner_label)
+        status_layout.setSpacing(8)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.backend_status_label)
         status_layout.addStretch()
-        status_layout.addWidget(self.progress_bar)
         status_widget.setLayout(status_layout)
         self.status_bar.addPermanentWidget(status_widget, 1)
         self.setStatusBar(self.status_bar)
 
-        self.sidebar.setCurrentRow(0)
+        self.rename_mode_button.setChecked(True)
+        self.on_mode_changed(0)
         self.update_backend_status_label()
 
         self.processing_enabled = False
-        self.spinner_timer = QTimer(self)
-        self.spinner_timer.timeout.connect(self.animate_spinner)
-        self.spinner_state = 0
 
         self.load_settings()
         self.ui_ready = True
@@ -1424,10 +1539,11 @@ class RenamerGUI(QMainWindow):
     # UI helpers
     # ------------------------------------------------------
 
-    def on_sidebar_changed(self, index: int):
+    def on_mode_changed(self, index: int):
         if index < 0 or index >= self.content_stack.count():
             return
         self.content_stack.setCurrentIndex(index)
+        self.append_status_message(f"[MODE] Switched to {['Rename', 'Filename Rules', 'Distribute'][index]}")
 
     def update_backend_status_label(self):
         if not hasattr(self, "backend_combo"):
@@ -1485,18 +1601,24 @@ class RenamerGUI(QMainWindow):
 
     def log_activity(self, message: str):
         log_info(message)
+        self.append_status_message(message)
+
+    def append_status_message(self, message: str):
+        if not hasattr(self, "status_log"):
+            return
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.status_log.appendPlainText(f"[{stamp}] {message}")
+        self.status_log.verticalScrollBar().setValue(self.status_log.verticalScrollBar().maximum())
 
     def set_status(self, text: str):
         if not text:
             text = "Working…"
         self.status_label.setText(text)
-
-    def animate_spinner(self):
-        dots = "." * (self.spinner_state % 4)
-        self.spinner_label.setText(f"⏳{dots}")
-        self.spinner_state += 1
+        self.append_status_message(f"[STATUS] {text}")
 
     def update_processing_progress(self, total: int = None, processed_override: int = None):
+        if self.stop_event.is_set() and not self.processing_enabled:
+            return
         total_files = total if total is not None else len(self.pdf_files)
         if total_files <= 0:
             total_files = 1
@@ -1506,26 +1628,17 @@ class RenamerGUI(QMainWindow):
             else len(self.file_results) + len(self.failed_indices)
         )
         processed = min(processed, total_files)
-        self.progress_bar.setRange(0, total_files)
-        self.progress_bar.setValue(processed)
-        self.progress_bar.setFormat(f"{processed}/{total_files} processed")
-        self.progress_bar.setTextVisible(True)
+        self.status_label.setText(f"{processed}/{total_files} processed")
+        self.append_status_message(f"[RUN] {processed}/{total_files} processed")
 
     def start_processing_ui(self, status: str = "Processing…", total: int = None):
         self.set_status(status)
         self.update_processing_progress(total)
-        self.spinner_timer.start(300)
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(True)
 
     def stop_processing_ui(self, status: str = "Idle"):
         self.set_status(status)
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("")
-        self.progress_bar.setTextVisible(False)
-        self.spinner_timer.stop()
-        self.spinner_label.setText("")
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(False)
 
@@ -1635,6 +1748,7 @@ class RenamerGUI(QMainWindow):
         if message:
             self.distribution_log_view.append(message)
             append_distribution_log(message)
+            self.append_status_message(message)
 
     def handle_distribution_progress(self, processed: int, total: int, status_text: str):
         total = max(1, total)
@@ -1644,6 +1758,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_progress.setValue(processed)
         self.distribution_progress.setFormat(f"{processed}/{total}")
         self.distribution_progress.setTextVisible(True)
+        self.append_status_message(f"[DISTRIBUTE] {processed}/{total} • {status_text}")
 
     def handle_distribution_log(self, message: str):
         self.append_distribution_log_message(message)
@@ -1654,6 +1769,8 @@ class RenamerGUI(QMainWindow):
             self.distribution_progress.setValue(self.distribution_progress.maximum())
         self.stop_distribution_ui("Finished")
         QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
+        if self.distribution_csv_log and os.path.exists(self.distribution_csv_log):
+            self.append_distribution_log_message(f"CSV log saved to: {self.distribution_csv_log}")
         self.distribution_worker = None
 
     # ------------------------------------------------------
@@ -1836,8 +1953,19 @@ class RenamerGUI(QMainWindow):
             return
 
         self.distribution_log_view.clear()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.distribution_csv_log = os.path.join(
+            input_dir, f"distribution_log_{timestamp}.csv"
+        )
+        self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
         self.start_distribution_ui(len(pdf_files))
-        self.distribution_worker = DistributionWorker(self, input_dir, pdf_files, case_index)
+        self.distribution_worker = DistributionWorker(
+            self,
+            input_dir,
+            pdf_files,
+            case_index,
+            csv_log_path=self.distribution_csv_log,
+        )
         self.distribution_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_worker.log_ready.connect(self.handle_distribution_log)
         self.distribution_worker.finished.connect(self.handle_distribution_finished)
@@ -1999,9 +2127,22 @@ class RenamerGUI(QMainWindow):
         self.start_processing_ui("Generating proposals…", total=len(self.pdf_files))
         self.start_parallel_processing()
 
+    def stop_generation(self):
+        if not self.processing_enabled and not self.active_workers:
+            self.append_status_message("[STOP] No active generation to stop.")
+            return
+        self.stop_event.set()
+        self.processing_enabled = False
+        for worker in list(self.active_workers.values()):
+            worker.requestInterruption()
+        self.set_status("Stopped • results kept")
+        self.append_status_message("[STOP] Halted new OCR/AI tasks; existing results preserved")
+        self.stop_processing_ui("Stopped")
+
     def stop_and_reprocess(self):
         self.stop_event.set()
         log_info("Stopping current processing and resetting state")
+        self.append_status_message("[RESET] Clearing OCR cache and filenames")
 
         for worker in list(self.active_workers.values()):
             worker.requestInterruption()
@@ -2166,36 +2307,37 @@ class RenamerGUI(QMainWindow):
     # Helpers
     def handle_worker_finished(self, index: int, result: dict):
         self.active_workers.pop(index, None)
-        if self.stop_event.is_set():
-            return
         self.file_results[index] = result
         self.apply_cached_result(index, result)
         self.update_processing_progress()
-        self.start_parallel_processing()
+        if not self.stop_event.is_set() and self.processing_enabled:
+            self.start_parallel_processing()
         self.log_activity(
             f"✓ Processed file {index + 1} of {len(self.pdf_files)} (chars: {result.get('char_count', 0)})"
         )
         if not self.active_workers:
-            self.stop_processing_ui("Idle")
-            log_info("All queued workers completed")
+            final_status = "Stopped" if self.stop_event.is_set() else "Idle"
+            self.stop_processing_ui(final_status)
+            log_info(f"All queued workers completed ({final_status})")
 
     def handle_worker_failed(self, index: int, error: Exception):
         self.active_workers.pop(index, None)
-        if self.stop_event.is_set():
-            return
         self.failed_indices.add(index)
         log_exception(error)
         log_info(f"Worker {index} failed: {error}")
-        show_friendly_error(
-            self,
-            "Processing failed",
-            "Renamer could not finish processing one of the files.",
-            traceback.format_exc(),
-        )
+        if not self.stop_event.is_set():
+            show_friendly_error(
+                self,
+                "Processing failed",
+                "Renamer could not finish processing one of the files.",
+                traceback.format_exc(),
+            )
         self.update_processing_progress()
-        self.start_parallel_processing()
+        if not self.stop_event.is_set() and self.processing_enabled:
+            self.start_parallel_processing()
         if not self.active_workers:
-            self.stop_processing_ui("Idle")
+            final_status = "Stopped" if self.stop_event.is_set() else "Idle"
+            self.stop_processing_ui(final_status)
 
     def on_row_selected(self, row: int, _col: int):
         self.current_index = row
@@ -2359,13 +2501,18 @@ if __name__ == "__main__":
             app.setStyleSheet(f.read())
     else:
         app.setStyleSheet(GLOBAL_STYLESHEET)
-    logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
-    icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
-    icon_file = icon_path if os.path.exists(icon_path) else logo_path
-    if os.path.exists(icon_file):
+    icon_candidates = [
+        os.path.join(BASE_DIR, "assets", "logo-256.png"),
+        os.path.join(BASE_DIR, "assets", "logo-64.png"),
+        os.path.join(BASE_DIR, "assets", "logo-32.png"),
+        os.path.join(BASE_DIR, "assets", "logo.ico"),
+        os.path.join(BASE_DIR, "assets", "logo.png"),
+    ]
+    icon_file = next((p for p in icon_candidates if os.path.exists(p)), None)
+    if icon_file and os.path.exists(icon_file):
         app.setWindowIcon(QIcon(icon_file))
     gui = RenamerGUI()
-    if os.path.exists(icon_file):
+    if icon_file and os.path.exists(icon_file):
         gui.setWindowIcon(QIcon(icon_file))
     gui.show()
     sys.exit(app.exec())
