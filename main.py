@@ -510,8 +510,6 @@ def parse_ai_metadata(raw: str) -> dict:
             lower_name = name.lower()
             if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in lower_name:
                 continue
-            if any(keyword in lower_name for keyword in BANNED_PARTY_KEYWORDS):
-                continue
             cleaned.append(name)
         max_items = FILENAME_RULES.get("max_parties", len(cleaned))
         if cleaned:
@@ -1506,8 +1504,6 @@ class RenamerGUI(QWidget):
         for name in names:
             lower_name = name.lower()
             if lower_name == "defendant":
-                continue
-            if any(keyword in lower_name for keyword in BANNED_PARTY_KEYWORDS):
                 continue
             if name not in cleaned:
                 cleaned.append(name)
