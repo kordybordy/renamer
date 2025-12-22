@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
-    QButtonGroup, QPlainTextEdit
+    QButtonGroup, QPlainTextEdit, QToolButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
@@ -1077,7 +1077,7 @@ class RenamerGUI(QMainWindow):
         title_col = QVBoxLayout()
         title_col.setSpacing(4)
         title_label = QLabel("[R] Renamer")
-        title_label.setObjectName("Title")
+        title_label.setObjectName("TitleLabel")
         subtitle_label = QLabel("Smart document naming")
         subtitle_label.setObjectName("Subtitle")
         title_col.addWidget(title_label)
@@ -1121,6 +1121,32 @@ class RenamerGUI(QMainWindow):
         self.content_stack.addWidget(self.main_page)
         self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.distribution_page)
+
+        def build_collapsible_section(title: str, body: QWidget, collapsed: bool = True) -> QWidget:
+            container = QFrame()
+            container_layout = QVBoxLayout()
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(4)
+            toggle = QToolButton()
+            toggle.setText(title)
+            toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            toggle.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
+            toggle.setCheckable(True)
+            toggle.setChecked(not collapsed)
+            toggle.setObjectName("CollapsibleToggle")
+            body.setVisible(not collapsed)
+
+            def on_toggled(checked: bool):
+                body.setVisible(checked)
+                toggle.setArrowType(
+                    Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+                )
+
+            toggle.toggled.connect(on_toggled)
+            container_layout.addWidget(toggle)
+            container_layout.addWidget(body)
+            container.setLayout(container_layout)
+            return container
 
         # Main page (Page 0)
         self.main_layout = QVBoxLayout()
@@ -1166,7 +1192,7 @@ class RenamerGUI(QMainWindow):
         action_layout.setContentsMargins(12, 12, 12, 12)
         action_layout.addStretch()
         self.play_button = QPushButton("SCAN")
-        self.play_button.setObjectName("Primary")
+        self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
         action_layout.addWidget(self.play_button)
         self.stop_button = QPushButton("STOP")
@@ -1215,7 +1241,7 @@ class RenamerGUI(QMainWindow):
         preview_group.setLayout(preview_layout)
         self.main_layout.addWidget(preview_group)
 
-        ocr_group = QGroupBox("OCR EXCERPT")
+        ocr_group = QGroupBox("")
         ocr_layout = QVBoxLayout()
         ocr_layout.setSpacing(6)
         ocr_layout.setContentsMargins(12, 12, 12, 12)
@@ -1229,9 +1255,9 @@ class RenamerGUI(QMainWindow):
         ocr_layout.addWidget(self.ocr_preview_label)
         ocr_layout.addWidget(self.ocr_preview)
         ocr_group.setLayout(ocr_layout)
-        self.main_layout.addWidget(ocr_group)
+        self.main_layout.addWidget(build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True))
 
-        log_group = QGroupBox("STATUS LOG")
+        log_group = QGroupBox("")
         log_layout = QVBoxLayout()
         log_layout.setSpacing(6)
         log_layout.setContentsMargins(12, 12, 12, 12)
@@ -1239,9 +1265,10 @@ class RenamerGUI(QMainWindow):
         self.status_log.setReadOnly(True)
         self.status_log.setPlaceholderText("[hh:mm:ss] status messages appear here")
         self.status_log.setMinimumHeight(110)
+        self.status_log.setObjectName("StatusLog")
         log_layout.addWidget(self.status_log)
         log_group.setLayout(log_layout)
-        self.main_layout.addWidget(log_group)
+        self.main_layout.addWidget(build_collapsible_section("STATUS LOG", log_group, collapsed=True))
 
         bottom_group = QGroupBox("ACTIONS")
         bottom_layout = QHBoxLayout()
@@ -1489,7 +1516,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_progress.setTextVisible(True)
         dist_controls.addWidget(self.distribution_progress)
         self.distribute_button = QPushButton("EXECUTE DISTRIBUTION")
-        self.distribute_button.setObjectName("Primary")
+        self.distribute_button.setObjectName("PrimaryButton")
         self.distribute_button.clicked.connect(self.on_distribute_clicked)
         dist_controls.addWidget(self.distribute_button)
         dist_controls_group.setLayout(dist_controls)
