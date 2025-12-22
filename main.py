@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import glob
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urljoin
 from dataclasses import dataclass
@@ -296,6 +297,9 @@ class NamingOptions:
     ocr_char_limit: int
     ocr_dpi: int
     ocr_pages: int
+    plaintiff_surname_first: bool
+    defendant_surname_first: bool
+    turbo_mode: bool
 
 
 def clean_party_name(raw: str) -> str:
@@ -321,6 +325,25 @@ def clean_party_name(raw: str) -> str:
             break
 
     return name[:80]
+
+
+def format_party_name(name: str, surname_first: bool) -> str:
+    tokens = [tok for tok in name.split() if tok]
+    if len(tokens) < 2:
+        return name
+
+    joined = " ".join(tokens)
+    if re.search(r"[\d/]", joined) or "." in joined:
+        return name
+
+    given = " ".join(tokens[:-1]).strip()
+    surname = tokens[-1].strip()
+    if not given or not surname:
+        return name
+
+    if surname_first:
+        return f"{surname} {given}".strip()
+    return f"{given} {surname}".strip()
 
 
 def normalize_target_filename(name: str) -> str:
@@ -484,29 +507,64 @@ def parse_ai_metadata(raw: str) -> dict:
     return meta
 
 
-def extract_metadata_ai(ocr_text: str, backend: str) -> dict:
+def query_backend_for_meta(target: str, ocr_text: str) -> dict:
+    raw = ""
+    try:
+        if target == "ollama":
+            raw = call_ollama_model(ocr_text)
+        else:
+            raw = call_openai_model(ocr_text)
+        meta = parse_ai_metadata(raw)
+        if meta:
+            log_info(f"AI metadata extracted using {target}")
+            return meta
+    except Exception as e:
+        log_exception(e)
+    return {}
+
+
+def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], attempts_per_backend: int = 2) -> dict:
+    workers = max(1, len(backends) * attempts_per_backend)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {}
+        for target in backends:
+            for _ in range(attempts_per_backend):
+                future = executor.submit(query_backend_for_meta, target, ocr_text)
+                future_map[future] = target
+        for fut in as_completed(future_map):
+            try:
+                meta = fut.result()
+            except Exception as e:
+                log_exception(e)
+                continue
+            if meta:
+                for other in future_map:
+                    if other is not fut:
+                        other.cancel()
+                return meta
+    return {}
+
+
+def extract_metadata_ai(ocr_text: str, backend: str, turbo: bool = False) -> dict:
     """Use AI backend to extract metadata; returns empty dict on failure."""
 
     if not ocr_text.strip():
         return {}
 
-    backends = [backend]
-    if backend == "auto":
+    if turbo:
         backends = ["ollama", "openai"]
+        meta = extract_metadata_ai_turbo(ocr_text, backends)
+        if meta:
+            return meta
+    else:
+        backends = [backend]
+        if backend == "auto":
+            backends = ["ollama", "openai"]
 
     for target in backends:
-        try:
-            if target == "ollama":
-                raw = call_ollama_model(ocr_text)
-            else:
-                raw = call_openai_model(ocr_text)
-            meta = parse_ai_metadata(raw)
-            if meta:
-                log_info(f"AI metadata extracted using {target}")
-                return meta
-        except Exception as e:
-            log_exception(e)
-            continue
+        meta = query_backend_for_meta(target, ocr_text)
+        if meta:
+            return meta
 
     return {}
 
@@ -531,6 +589,32 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("plaintiff", "Plaintiff")
     if requirements.get("defendant"):
         meta.setdefault("defendant", "Defendant")
+    return meta
+
+
+def format_party_field(value, surname_first: bool) -> str:
+    names: list[str] = []
+    if isinstance(value, str):
+        names = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, list):
+        names = [str(item).strip() for item in value if str(item).strip()]
+    if not names:
+        return value if isinstance(value, str) else ""
+
+    formatted = [format_party_name(name, surname_first) for name in names]
+    return ", ".join(formatted)
+
+
+def apply_party_order(meta: dict, options: NamingOptions) -> dict:
+    meta = meta.copy()
+    if "plaintiff" in meta:
+        meta["plaintiff"] = format_party_field(
+            meta.get("plaintiff"), options.plaintiff_surname_first
+        )
+    if "defendant" in meta:
+        meta["defendant"] = format_party_field(
+            meta.get("defendant"), options.defendant_surname_first
+        )
     return meta
 
 
@@ -650,12 +734,13 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            ai_meta = extract_metadata_ai(ocr_text, self.backend)
+            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.turbo_mode)
             meta = ai_meta or {}
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
             ]
             meta = apply_meta_defaults(meta, self.requirements)
+            meta = apply_party_order(meta, self.options)
 
             if defaults_applied:
                 log_info(
@@ -913,6 +998,31 @@ class RenamerGUI(QWidget):
         backend_row.addWidget(self.ollama_badge)
         backend_row.addStretch()
         self.settings_layout.addLayout(backend_row)
+
+        turbo_row = QHBoxLayout()
+        self.turbo_mode_checkbox = QCheckBox("Turbo mode (parallel AI queries)")
+        self.turbo_mode_checkbox.setToolTip("Send a couple of requests to each backend and keep the first valid answer.")
+        turbo_row.addWidget(self.turbo_mode_checkbox)
+        turbo_row.addStretch()
+        self.settings_layout.addLayout(turbo_row)
+
+        name_order_row = QHBoxLayout()
+        name_order_row.addWidget(QLabel("Plaintiff order:"))
+        self.plaintiff_order_combo = QComboBox()
+        self.plaintiff_order_combo.addItem("Surname Name", True)
+        self.plaintiff_order_combo.addItem("Name Surname", False)
+        self.plaintiff_order_combo.currentIndexChanged.connect(self.update_preview)
+        name_order_row.addWidget(self.plaintiff_order_combo)
+
+        name_order_row.addWidget(QLabel("Defendant order:"))
+        self.defendant_order_combo = QComboBox()
+        self.defendant_order_combo.addItem("Surname Name", True)
+        self.defendant_order_combo.addItem("Name Surname", False)
+        self.defendant_order_combo.currentIndexChanged.connect(self.update_preview)
+        name_order_row.addWidget(self.defendant_order_combo)
+
+        name_order_row.addStretch()
+        self.settings_layout.addLayout(name_order_row)
         
         self.main_layout.addWidget(QLabel("Files and proposed names:"))
         self.file_table = QTableWidget(0, 2)
@@ -1027,6 +1137,15 @@ class RenamerGUI(QWidget):
             self.settings.value("distribution_input_folder", self.settings.value("input_folder", ""))
         )
         self.case_root_edit.setText(self.settings.value("case_root_folder", ""))
+        default_order = FILENAME_RULES.get("surname_first", True)
+        turbo_mode = self.settings.value("turbo_mode", False)
+        self.turbo_mode_checkbox.setChecked(str(turbo_mode).lower() == "true")
+        plaintiff_order = self.settings.value("plaintiff_surname_first", default_order)
+        defendant_order = self.settings.value("defendant_surname_first", default_order)
+        plaintiff_order_bool = str(plaintiff_order).lower() == "true"
+        defendant_order_bool = str(defendant_order).lower() == "true"
+        self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
+        self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
         saved_template = self.settings.value("template", [])
         if isinstance(saved_template, str):
             saved_template = json.loads(saved_template) if saved_template else []
@@ -1046,6 +1165,13 @@ class RenamerGUI(QWidget):
         self.settings.setValue("distribution_input_folder", self.distribution_input_edit.text())
         self.settings.setValue("case_root_folder", self.case_root_edit.text())
         self.settings.setValue("template", self.get_template_elements())
+        self.settings.setValue("turbo_mode", self.turbo_mode_checkbox.isChecked())
+        self.settings.setValue(
+            "plaintiff_surname_first", bool(self.plaintiff_order_combo.currentData())
+        )
+        self.settings.setValue(
+            "defendant_surname_first", bool(self.defendant_order_combo.currentData())
+        )
 
     def closeEvent(self, event):
         self.save_settings()
@@ -1064,9 +1190,24 @@ class RenamerGUI(QWidget):
         self.spinner_label.setText(f"⏳{dots}")
         self.spinner_state += 1
 
-    def start_processing_ui(self, status: str = "Processing…"):
+    def update_processing_progress(self, total: int = None, processed_override: int = None):
+        total_files = total if total is not None else len(self.pdf_files)
+        if total_files <= 0:
+            total_files = 1
+        processed = (
+            processed_override
+            if processed_override is not None
+            else len(self.file_results) + len(self.failed_indices)
+        )
+        processed = min(processed, total_files)
+        self.progress_bar.setRange(0, total_files)
+        self.progress_bar.setValue(processed)
+        self.progress_bar.setFormat(f"{processed}/{total_files} processed")
+        self.progress_bar.setTextVisible(True)
+
+    def start_processing_ui(self, status: str = "Processing…", total: int = None):
         self.set_status(status)
-        self.progress_bar.setRange(0, 0)
+        self.update_processing_progress(total)
         self.spinner_timer.start(300)
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(True)
@@ -1075,6 +1216,8 @@ class RenamerGUI(QWidget):
         self.set_status(status)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("")
+        self.progress_bar.setTextVisible(False)
         self.spinner_timer.stop()
         self.spinner_label.setText("")
         for btn in (self.play_button, self.btn_process, self.btn_all):
@@ -1290,8 +1433,9 @@ class RenamerGUI(QWidget):
             log_exception(e)
             ocr_text = ""
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend())
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
         meta = apply_meta_defaults(ai_meta or {}, requirements)
+        meta = apply_party_order(meta, options)
         result = {"meta": meta, "raw_meta": ai_meta or {}, "ocr_text": ocr_text}
         self.distribution_meta_cache[pdf_path] = result
         return result
@@ -1431,6 +1575,9 @@ class RenamerGUI(QWidget):
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
             ocr_pages=self.ocr_pages_spin.value(),
+            plaintiff_surname_first=bool(self.plaintiff_order_combo.currentData()),
+            defendant_surname_first=bool(self.defendant_order_combo.currentData()),
+            turbo_mode=self.turbo_mode_checkbox.isChecked(),
         )
 
     def display_name_for_element(self, element: str) -> str:
@@ -1505,6 +1652,7 @@ class RenamerGUI(QWidget):
             meta = self.file_results[self.current_index].get("meta", meta)
         requirements = requirements_from_template(options.template_elements)
         meta = apply_meta_defaults(meta, requirements)
+        meta = apply_party_order(meta, options)
         filename = build_filename(meta, options)
         display_name = filename or "—"
         self.preview_value.setText(display_name)
@@ -1565,7 +1713,7 @@ class RenamerGUI(QWidget):
         log_info(
             f"Starting generation for {len(self.pdf_files)} files using backend {self.get_ai_backend()}"
         )
-        self.start_processing_ui("Generating proposals…")
+        self.start_processing_ui("Generating proposals…", total=len(self.pdf_files))
         self.start_parallel_processing()
 
     def stop_and_reprocess(self):
@@ -1614,7 +1762,7 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
 
         self.update_filename_for_current_row()
-        self.start_processing_ui("Renaming current file…")
+        self.start_processing_ui("Renaming current file…", total=1)
 
         pdf_name = self.pdf_files[self.current_index]
         inp = os.path.join(self.input_edit.text(), pdf_name)
@@ -1638,6 +1786,7 @@ class RenamerGUI(QWidget):
             shutil.move(inp, out)
             if self.current_index in self.file_results:
                 self.file_results[self.current_index]["filename"] = target_name
+            self.update_processing_progress(total=1, processed_override=1)
             QMessageBox.information(self, "Done", f"Renamed:\n{out}")
         except Exception as e:
             log_exception(e)
@@ -1666,7 +1815,7 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
-        self.start_processing_ui("Renaming all files…")
+        self.start_processing_ui("Renaming all files…", total=len(self.pdf_files))
         for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
@@ -1686,6 +1835,9 @@ class RenamerGUI(QWidget):
                 inp_path = os.path.join(self.input_edit.text(), pdf_name)
                 out_path = os.path.join(out_folder, target_name)
                 shutil.move(inp_path, out_path)
+                self.update_processing_progress(
+                    total=len(self.pdf_files), processed_override=idx + 1
+                )
             except Exception as e:
                 log_exception(e)
                 show_friendly_error(
@@ -1735,6 +1887,7 @@ class RenamerGUI(QWidget):
             return
         self.file_results[index] = result
         self.apply_cached_result(index, result)
+        self.update_processing_progress()
         self.start_parallel_processing()
         self.log_activity(
             f"✓ Processed file {index + 1} of {len(self.pdf_files)} (chars: {result.get('char_count', 0)})"
@@ -1756,6 +1909,7 @@ class RenamerGUI(QWidget):
             "Renamer could not finish processing one of the files.",
             traceback.format_exc(),
         )
+        self.update_processing_progress()
         self.start_parallel_processing()
         if not self.active_workers:
             self.stop_processing_ui("Idle")
@@ -1806,10 +1960,11 @@ class RenamerGUI(QWidget):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend())
+        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
         meta = ai_meta or {}
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
         meta = apply_meta_defaults(meta, requirements)
+        meta = apply_party_order(meta, options)
 
         if defaults_applied:
             self.log_activity(
