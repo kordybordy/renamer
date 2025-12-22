@@ -3,7 +3,7 @@
 /* ============================= */
 * {
     font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
-    font-size: 11pt;
+    font-size: 10pt;
     color: #d0d0d0;
 }
 
@@ -15,14 +15,14 @@ QWidget {
 /* HEADERS / LABELS              */
 /* ============================= */
 QLabel#Title {
-    font-size: 14pt;
+    font-size: 13pt;
     font-weight: 700;
     color: #7aa2f7;
     letter-spacing: 1px;
 }
 
 QLabel#Subtitle {
-    font-size: 10pt;
+    font-size: 9pt;
     color: #9aa0a7;
 }
 
@@ -31,8 +31,8 @@ QLabel#Subtitle {
 /* ============================= */
 QPushButton#ModeButton {
     background: #0b0b0f;
-    border: 2px solid #3a3a44;
-    padding: 8px 14px;
+    border: 1px solid #3a3a44;
+    padding: 6px 12px;
     font-weight: 600;
     color: #c4c4cc;
     border-radius: 0;
@@ -52,16 +52,16 @@ QPushButton#ModeButton:hover {
 /* GROUP BOXES                   */
 /* ============================= */
 QGroupBox {
-    border: 2px solid #3a3a44;
-    margin-top: 12px;
-    padding: 8px;
+    border: 1px solid #3a3a44;
+    margin-top: 8px;
+    padding: 6px;
     background: #111118;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
     left: 8px;
-    padding: 0 6px;
+    padding: 0 4px;
     background: #0e0e11;
     color: #7aa2f7;
 }
@@ -75,14 +75,14 @@ QFrame {
 /* ============================= */
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
     background-color: #0b0b0f;
-    border: 2px solid #444;
-    padding: 6px;
+    border: 1px solid #444;
+    padding: 5px;
     border-radius: 0;
     selection-background-color: #7aa2f7;
 }
 
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
-    border: 2px solid #7aa2f7;
+    border: 1px solid #7aa2f7;
 }
 
 /* ============================= */
@@ -90,8 +90,8 @@ QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
 /* ============================= */
 QPushButton {
     background: #1a1a22;
-    border: 2px solid #5a5a66;
-    padding: 8px 12px;
+    border: 1px solid #5a5a66;
+    padding: 6px 10px;
     color: #d0d0d0;
     border-radius: 0;
 }
@@ -108,7 +108,7 @@ QPushButton#Primary {
     background: #2c2c3a;
     border-color: #7aa2f7;
     color: #7aa2f7;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 /* ============================= */
@@ -117,18 +117,18 @@ QPushButton#Primary {
 QTableWidget {
     background-color: #0b0b0f;
     gridline-color: #333;
-    border: 2px solid #444;
+    border: 1px solid #444;
 }
 
 QHeaderView::section {
     background-color: #1a1a22;
-    border: 2px solid #3a3a44;
-    padding: 6px;
+    border: 1px solid #3a3a44;
+    padding: 5px;
 }
 
 QListWidget, QListView {
     background: #0b0b0f;
-    border: 2px solid #3a3a44;
+    border: 1px solid #3a3a44;
 }
 
 /* ============================= */
@@ -136,7 +136,7 @@ QListWidget, QListView {
 /* ============================= */
 QStatusBar {
     background-color: #0b0b0f;
-    border-top: 2px solid #3a3a44;
+    border-top: 1px solid #3a3a44;
     color: #9aa0a7;
 }
 
