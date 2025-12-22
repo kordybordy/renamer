@@ -372,7 +372,16 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             pdf_path,
             os.path.join(output_dir, "page"),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
         image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.png")))
         if not image_paths:
             # Fallback for environments where pdftoppm defaults to PPM
