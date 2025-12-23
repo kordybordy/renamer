@@ -65,6 +65,14 @@ def show_friendly_error(
     box.exec()
 
 
+def is_drive_root(path: str) -> bool:
+    normalized = os.path.abspath(path)
+    drive, tail = os.path.splitdrive(normalized)
+    if drive:
+        return normalized.rstrip("\\/") == drive.rstrip("\\/")
+    return normalized == os.path.abspath(os.sep)
+
+
 @dataclass
 class NamingOptions:
     template_elements: list[str]
@@ -186,35 +194,26 @@ class DistributionWorker(QThread):
     log_ready = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, gui_ref, input_dir: str, pdf_files: List[str], case_index: List[CaseFolderInfo]):
+    def __init__(self, gui_ref, plan: List[dict], dry_run: bool):
         super().__init__()
         self.gui_ref = gui_ref
-        self.input_dir = input_dir
-        self.pdf_files = pdf_files
-        self.case_index = case_index
+        self.plan = plan
+        self.dry_run = dry_run
 
     def run(self):
         processed = 0
-        total = len(self.pdf_files)
+        total = len(self.plan)
+        runtime_reserved: Dict[str, set[str]] = {}
         try:
-            for pdf in self.pdf_files:
-                pdf_path = os.path.join(self.input_dir, pdf)
+            for entry in self.plan:
+                pdf = entry.get("pdf")
+                pdf_path = entry.get("pdf_path")
                 status_text = f"Processing {pdf}"
                 self.progress.emit(processed, total, status_text)
                 log_lines = [f"PDF: {pdf}"]
-                try:
-                    result = self.gui_ref.get_or_generate_distribution_result(pdf_path, pdf)
-                except Exception as e:
-                    log_exception(e)
-                    log_lines.append("Status: error while extracting defendants")
-                    self.log_ready.emit("\n".join(log_lines))
-                    processed += 1
-                    self.progress.emit(processed, total, f"{status_text} (error)")
-                    continue
-
-                raw_meta = result.get("raw_meta") or result.get("meta") or {}
+                raw_meta = entry.get("raw_meta", {})
+                defendants = entry.get("defendants", [])
                 log_lines.append(f"Raw defendant field value: {raw_meta.get('defendant')!r}")
-                defendants = self.gui_ref.get_defendants_from_result(result)
                 if defendants:
                     log_lines.append(f"Defendants: {', '.join(defendants)}")
                     primary_defendant = defendants[0]
@@ -228,29 +227,60 @@ class DistributionWorker(QThread):
                     primary_defendant = "—"
 
                 status_text = f"Processing {pdf} → {primary_defendant}"
-                matches: List[CaseFolderInfo] = []
-                if defendants:
-                    try:
-                        matches = self.gui_ref.distribution_manager.find_matches(defendants, self.case_index)
-                    except Exception as e:
-                        log_exception(e)
-
+                matches: List[dict] = entry.get("matches", [])
                 if matches:
                     log_lines.append("Matched folders:")
                     for match in matches:
-                        log_lines.append(f" - {os.path.basename(match.path)}")
+                        folder = match.get("folder")
+                        log_lines.append(f" - {os.path.basename(folder.path)} as {match.get('target_name')}")
                     if len(matches) > 1:
                         log_lines.append("Note: multiple matches detected, copied to all.")
                     for match in matches:
+                        folder: CaseFolderInfo = match["folder"]
+                        target_name = match["target_name"]
+                        folder_path = folder.path
+                        reserved_names = runtime_reserved.setdefault(folder_path, set())
+                        destination = os.path.join(folder_path, target_name)
+                        if target_name in reserved_names:
+                            target_name = self.gui_ref.compute_unique_name(folder_path, target_name, reserved_names)
+                            destination = os.path.join(folder_path, target_name)
+                        if not self.dry_run and os.path.exists(destination):
+                            target_name = self.gui_ref.compute_unique_name(folder_path, target_name, reserved_names)
+                            destination = os.path.join(folder_path, target_name)
+                        reserved_names.add(target_name)
                         try:
-                            copied_name = self.gui_ref.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
-                            log_lines.append(
-                                f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
-                            )
+                            if self.dry_run:
+                                self.gui_ref.log_copy_action(
+                                    pdf_path,
+                                    destination,
+                                    dry_run=True,
+                                    success=True,
+                                    context="Distribution",
+                                )
+                                log_lines.append(f"Action: DRY RUN → {destination}")
+                            else:
+                                shutil.copy2(pdf_path, destination)
+                                self.gui_ref.log_copy_action(
+                                    pdf_path,
+                                    destination,
+                                    dry_run=False,
+                                    success=True,
+                                    context="Distribution",
+                                )
+                                log_lines.append(
+                                    f"Action: copied to {os.path.basename(folder.path)} as {target_name}"
+                                )
                         except Exception as e:
                             log_exception(e)
+                            self.gui_ref.log_copy_action(
+                                pdf_path,
+                                destination,
+                                dry_run=self.dry_run,
+                                success=False,
+                                context="Distribution",
+                            )
                             log_lines.append(
-                                f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
+                                f"Action: failed to copy to {os.path.basename(folder.path)} ({e})"
                             )
                 else:
                     candidate_surnames = [
@@ -259,7 +289,7 @@ class DistributionWorker(QThread):
                         if name
                     ]
                     log_lines.append(
-                        f"Status: no matching case folder found (checked {len(self.case_index)} folders; surnames tried={candidate_surnames})"
+                        f"Status: no matching case folder found (surnames tried={candidate_surnames})"
                     )
 
                 self.log_ready.emit("\n".join(log_lines))
@@ -293,6 +323,7 @@ class RenamerGUI(QWidget):
         self.distribution_manager = DistributionManager(normalize_polish)
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
+        self.active_distribution_dry_run = False
         self.custom_elements: Dict[str, Dict[str, str]] = {}
 
         self.preview_value = QLabel("—")
@@ -403,6 +434,15 @@ class RenamerGUI(QWidget):
         log_toggle_row.addWidget(self.log_toggle)
         log_toggle_row.addStretch()
         self.distribution_layout.addLayout(log_toggle_row)
+
+        dist_dry_run_row = QHBoxLayout()
+        self.distribution_dry_run_checkbox = QCheckBox("Dry run (simulate distribution; no copies)")
+        self.distribution_dry_run_checkbox.setToolTip(
+            "Preview distribution actions without writing any files. Logs will show planned copies."
+        )
+        dist_dry_run_row.addWidget(self.distribution_dry_run_checkbox)
+        dist_dry_run_row.addStretch()
+        self.distribution_layout.addLayout(dist_dry_run_row)
 
         self.distribution_log_container = QWidget()
         dist_log_layout = QVBoxLayout()
@@ -638,6 +678,12 @@ class RenamerGUI(QWidget):
         self.ocr_preview_container.setVisible(False)
         self.main_layout.addWidget(self.ocr_preview_container)
 
+        self.rename_dry_run_checkbox = QCheckBox("Dry run (no files will be copied)")
+        self.rename_dry_run_checkbox.setToolTip(
+            "Preview rename operations without writing any files. All actions will be logged."
+        )
+        self.main_layout.addWidget(self.rename_dry_run_checkbox)
+
         h5 = QHBoxLayout()
 
         btn_process = QPushButton("✎ Rename Selected")
@@ -700,6 +746,125 @@ class RenamerGUI(QWidget):
 
     def log_activity(self, message: str):
         log_info(message)
+
+    def validate_base_path(self, path: str, label: str) -> bool:
+        normalized = os.path.abspath(path)
+        if not path:
+            self.log_activity(f"[Safety] {label} missing; blocking operation")
+            show_friendly_error(
+                self,
+                f"{label} missing",
+                f"Please choose a {label.lower()} before continuing.",
+                "Path was empty during validation.",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return False
+        if len(normalized) <= 10:
+            self.log_activity(f"[Safety] {label} too short: {normalized}")
+            show_friendly_error(
+                self,
+                f"{label} too short",
+                f"{label} path looks unsafe. Choose a deeper folder (length > 10).",
+                f"Rejected path: {normalized}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return False
+        if is_drive_root(normalized):
+            self.log_activity(f"[Safety] {label} points to drive root: {normalized}")
+            show_friendly_error(
+                self,
+                f"{label} not allowed",
+                "Drive roots are not allowed. Pick a dedicated working folder.",
+                f"Rejected path: {normalized}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return False
+        home_dir = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+        if os.path.normcase(normalized) == home_dir:
+            self.log_activity(f"[Safety] {label} equals home directory: {normalized}")
+            show_friendly_error(
+                self,
+                f"{label} not allowed",
+                "The home directory cannot be used directly. Select a specific subfolder.",
+                f"Rejected path: {normalized}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return False
+        return True
+
+    def validate_path_relations(self, labeled_paths: Dict[str, str]) -> bool:
+        items = [(label, os.path.abspath(path)) for label, path in labeled_paths.items() if path]
+        for i in range(len(items)):
+            label_a, path_a = items[i]
+            for j in range(i + 1, len(items)):
+                label_b, path_b = items[j]
+                if os.path.normcase(path_a) == os.path.normcase(path_b):
+                    message = f"{label_a} and {label_b} cannot point to the same location."
+                    self.log_activity(f"[Safety] {message} ({path_a})")
+                    show_friendly_error(
+                        self,
+                        "Path conflict",
+                        message,
+                        f"Conflicting path: {path_a}",
+                        icon=QMessageBox.Icon.Warning,
+                    )
+                    return False
+                try:
+                    common = os.path.commonpath([path_a, path_b])
+                except ValueError:
+                    continue
+                if common in (path_a, path_b):
+                    message = f"{label_a} and {label_b} cannot be parent/child paths."
+                    self.log_activity(f"[Safety] {message} ({path_a} vs {path_b})")
+                    show_friendly_error(
+                        self,
+                        "Path conflict",
+                        message,
+                        f"Paths: {path_a} and {path_b} are related.",
+                        icon=QMessageBox.Icon.Warning,
+                    )
+                    return False
+        return True
+
+    def validate_rename_paths(self) -> bool:
+        input_dir = self.input_edit.text()
+        output_dir = self.output_edit.text()
+        if not (self.validate_base_path(input_dir, "Input folder") and self.validate_base_path(output_dir, "Output folder")):
+            return False
+        return self.validate_path_relations({"Input folder": input_dir, "Output folder": output_dir})
+
+    def validate_distribution_paths(self, input_dir: str, case_root: str) -> bool:
+        if not (self.validate_base_path(input_dir, "Distribution input folder") and self.validate_base_path(case_root, "Case root")):
+            return False
+        return self.validate_path_relations({"Distribution input folder": input_dir, "Case root": case_root})
+
+    def compute_unique_name(self, target_dir: str, filename: str, reserved: set[str]) -> str:
+        base, ext = os.path.splitext(filename)
+        candidate = filename
+        counter = 1
+        while os.path.exists(os.path.join(target_dir, candidate)) or candidate in reserved:
+            candidate = f"{base} ({counter}){ext}"
+            counter += 1
+        return candidate
+
+    def log_copy_action(self, source: str, destination: str, *, dry_run: bool, success: bool, context: str):
+        status = "DRY-RUN" if dry_run else "COPY"
+        outcome = "success" if success else "failed"
+        log_info(f"[{context}] {status} {outcome}: {source} -> {destination}")
+
+    def confirm_batch_operation(self, title: str, summary_lines: List[str], detail_lines: List[str], dry_run: bool) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        dry_run_note = "DRY RUN (no files will be copied)" if dry_run else "Execution mode: copy files"
+        box.setText("\n".join(summary_lines + [dry_run_note, "NO FILES WILL BE DELETED."]))
+        detail_text = "\n".join(detail_lines)
+        if detail_text:
+            box.setInformativeText("Review the planned file actions below. Operation will be blocked if you cancel.")
+            box.setDetailedText(detail_text)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        return box.exec() == QMessageBox.StandardButton.Ok
 
     def set_status(self, text: str):
         if not text:
@@ -873,15 +1038,25 @@ class RenamerGUI(QWidget):
         self.append_distribution_log_message(message)
 
     def handle_distribution_finished(self):
-        self.distribution_status_label.setText("Finished")
+        final_status = "Finished (dry run)" if self.active_distribution_dry_run else "Finished"
+        self.distribution_status_label.setText(final_status)
         if self.distribution_progress.maximum() > 0:
             self.distribution_progress.setValue(self.distribution_progress.maximum())
-        self.stop_distribution_ui("Finished")
-        QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
+        self.stop_distribution_ui(final_status)
+        QMessageBox.information(
+            self,
+            "Distribution complete",
+            "Dry run complete. No files were copied." if self.active_distribution_dry_run else "Finished distributing PDFs.",
+        )
         self.distribution_worker = None
 
     def load_pdfs(self):
         folder = self.input_edit.text()
+        if not self.validate_base_path(folder, "Input folder"):
+            return
+        if self.output_edit.text():
+            if not self.validate_path_relations({"Input folder": folder, "Output folder": self.output_edit.text()}):
+                return
         if not os.path.isdir(folder):
             show_friendly_error(
                 self,
@@ -1001,6 +1176,7 @@ class RenamerGUI(QWidget):
     def on_distribute_clicked(self):
         input_dir = self.distribution_input_edit.text() or self.input_edit.text()
         case_root = self.case_root_edit.text()
+        dry_run = self.distribution_dry_run_checkbox.isChecked()
 
         if self.distribution_worker and self.distribution_worker.isRunning():
             show_friendly_error(
@@ -1010,6 +1186,9 @@ class RenamerGUI(QWidget):
                 "Distribution worker already running.",
                 icon=QMessageBox.Icon.Information,
             )
+            return
+
+        if not self.validate_distribution_paths(input_dir, case_root):
             return
 
         if not os.path.isdir(input_dir):
@@ -1065,9 +1244,92 @@ class RenamerGUI(QWidget):
             )
             return
 
+        self.distribution_status_label.setText("Planning distribution…")
+        reserved_names: Dict[str, set[str]] = {}
+        planned_actions: List[dict] = []
+        detail_lines: List[str] = []
+        for pdf in pdf_files:
+            pdf_path = os.path.join(input_dir, pdf)
+            if not os.path.isfile(pdf_path):
+                detail_lines.append(f"{pdf} -> skipped (not a file)")
+                continue
+            try:
+                result = self.get_or_generate_distribution_result(pdf_path, pdf)
+            except Exception as e:
+                log_exception(e)
+                detail_lines.append(f"{pdf} -> error extracting metadata ({e})")
+                continue
+
+            raw_meta = result.get("raw_meta") or result.get("meta") or {}
+            defendants = self.get_defendants_from_result(result)
+            matches: List[CaseFolderInfo] = []
+            if defendants:
+                try:
+                    matches = self.distribution_manager.find_matches(defendants, case_index)
+                except Exception as e:
+                    log_exception(e)
+                    detail_lines.append(f"{pdf} -> match error ({e})")
+            match_payloads: List[dict] = []
+            if matches:
+                for match in matches:
+                    if match.path not in reserved_names:
+                        try:
+                            reserved_names[match.path] = set(os.listdir(match.path))
+                        except Exception as e:
+                            log_exception(e)
+                            show_friendly_error(
+                                self,
+                                "Case folder error",
+                                "Renamer could not inspect one of the case folders safely.",
+                                traceback.format_exc(),
+                            )
+                            return
+                    target_name = self.compute_unique_name(match.path, pdf, reserved_names[match.path])
+                    reserved_names[match.path].add(target_name)
+                    destination = os.path.join(match.path, target_name)
+                    detail_lines.append(f"{pdf} -> {destination}")
+                    match_payloads.append({"folder": match, "target_name": target_name})
+            else:
+                detail_lines.append(f"{pdf} -> (no matching case folder)")
+
+            planned_actions.append(
+                {
+                    "pdf": pdf,
+                    "pdf_path": pdf_path,
+                    "raw_meta": raw_meta,
+                    "defendants": defendants,
+                    "matches": match_payloads,
+                }
+            )
+
+        if not planned_actions:
+            show_friendly_error(
+                self,
+                "No distributable files",
+                "Renamer could not prepare any distribution actions.",
+                "No valid PDF files were queued after validation.",
+                icon=QMessageBox.Icon.Warning,
+            )
+            self.distribution_status_label.setText("Idle")
+            return
+
+        summary_lines = [
+            f"Distribution input: {input_dir}",
+            f"Case root: {case_root}",
+            f"Files queued: {len(pdf_files)}",
+            "Mode: COPY (originals untouched)",
+        ]
+
+        if not self.confirm_batch_operation(
+            "Confirm distribution", summary_lines, detail_lines, dry_run
+        ):
+            self.distribution_status_label.setText("Cancelled")
+            return
+
         self.distribution_log_view.clear()
-        self.start_distribution_ui(len(pdf_files))
-        self.distribution_worker = DistributionWorker(self, input_dir, pdf_files, case_index)
+        self.active_distribution_dry_run = dry_run
+        self.start_distribution_ui(len(planned_actions))
+        self.distribution_worker = DistributionWorker(self, planned_actions, dry_run)
         self.distribution_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_worker.log_ready.connect(self.handle_distribution_log)
         self.distribution_worker.finished.connect(self.handle_distribution_finished)
@@ -1320,6 +1582,8 @@ class RenamerGUI(QWidget):
 
     def process_this_file(self):
         out_folder = self.output_edit.text()
+        if not self.validate_rename_paths():
+            return
         if not os.path.isdir(out_folder):
             show_friendly_error(
                 self,
@@ -1336,10 +1600,20 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
 
         self.update_filename_for_current_row()
-        self.start_processing_ui("Renaming current file…", total=1)
+        self.start_processing_ui("Copying current file…", total=1)
 
         pdf_name = self.pdf_files[self.current_index]
         inp = os.path.join(self.input_edit.text(), pdf_name)
+        if not os.path.isfile(inp):
+            self.stop_processing_ui("Idle")
+            show_friendly_error(
+                self,
+                "File missing",
+                "The selected PDF could not be found on disk.",
+                f"Checked path: {inp}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
 
         proposed = self.file_table.item(self.current_index, 1)
         target_name_raw = proposed.text() if proposed else self.filename_edit.text()
@@ -1354,20 +1628,30 @@ class RenamerGUI(QWidget):
             )
             return
 
-        out = os.path.join(out_folder, target_name)
+        reserved = set(os.listdir(out_folder))
+        final_name = self.compute_unique_name(out_folder, target_name, reserved)
+        out = os.path.join(out_folder, final_name)
+        dry_run = self.rename_dry_run_checkbox.isChecked()
 
         try:
-            shutil.move(inp, out)
+            if not dry_run:
+                shutil.copy2(inp, out)
+            self.log_copy_action(inp, out, dry_run=dry_run, success=True, context="RenameSingle")
             if self.current_index in self.file_results:
-                self.file_results[self.current_index]["filename"] = target_name
+                self.file_results[self.current_index]["filename"] = final_name
             self.update_processing_progress(total=1, processed_override=1)
-            QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+            QMessageBox.information(
+                self,
+                "Done",
+                "Dry run complete. No files were copied." if dry_run else f"Copied to:\n{out}",
+            )
         except Exception as e:
             log_exception(e)
+            self.log_copy_action(inp, out, dry_run=dry_run, success=False, context="RenameSingle")
             show_friendly_error(
                 self,
                 "Rename failed",
-                "Renamer could not move the file to the output folder.",
+                "Renamer could not copy the file to the output folder.",
                 traceback.format_exc(),
             )
         finally:
@@ -1375,6 +1659,8 @@ class RenamerGUI(QWidget):
 
     def process_all_files_safe(self):
         out_folder = self.output_edit.text()
+        if not self.validate_rename_paths():
+            return
         if not os.path.isdir(out_folder):
             show_friendly_error(
                 self,
@@ -1389,7 +1675,24 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
-        self.start_processing_ui("Renaming all files…", total=len(self.pdf_files))
+        dry_run = self.rename_dry_run_checkbox.isChecked()
+        self.start_processing_ui("Planning copy operations…", total=len(self.pdf_files))
+        try:
+            reserved_names = set(os.listdir(out_folder))
+        except Exception as e:
+            log_exception(e)
+            self.stop_processing_ui("Idle")
+            show_friendly_error(
+                self,
+                "Output folder unreadable",
+                "Renamer could not inspect the output folder safely.",
+                traceback.format_exc(),
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        planned_actions: List[dict] = []
+        detail_lines: List[str] = []
         for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
@@ -1403,27 +1706,94 @@ class RenamerGUI(QWidget):
                 raw_name = proposed_item.text() if proposed_item else result.get("filename", pdf_name)
                 target_name = normalize_target_filename(raw_name)
                 if not target_name:
-                    raise ValueError(f"Empty or invalid filename for {pdf_name}")
+                    detail_lines.append(f"{pdf_name} -> skipped (invalid filename)")
+                    self.failed_indices.add(idx)
+                    continue
                 self.file_results[idx]["filename"] = target_name
 
                 inp_path = os.path.join(self.input_edit.text(), pdf_name)
-                out_path = os.path.join(out_folder, target_name)
-                shutil.move(inp_path, out_path)
-                self.update_processing_progress(
-                    total=len(self.pdf_files), processed_override=idx + 1
+                if not os.path.isfile(inp_path):
+                    detail_lines.append(f"{pdf_name} -> skipped (missing source file)")
+                    self.failed_indices.add(idx)
+                    continue
+                final_name = self.compute_unique_name(out_folder, target_name, reserved_names)
+                reserved_names.add(final_name)
+                out_path = os.path.join(out_folder, final_name)
+                detail_lines.append(f"{inp_path} -> {out_path}")
+                planned_actions.append(
+                    {
+                        "index": idx,
+                        "source": inp_path,
+                        "destination": out_path,
+                        "final_name": final_name,
+                    }
                 )
+                self.update_processing_progress(total=len(self.pdf_files), processed_override=idx + 1)
             except Exception as e:
                 log_exception(e)
+                detail_lines.append(f"{pdf_name} -> skipped due to error ({e})")
+                continue
+
+        if not planned_actions:
+            self.stop_processing_ui("Idle")
+            show_friendly_error(
+                self,
+                "No actions planned",
+                "Renamer could not prepare any safe copy operations.",
+                "\n".join(detail_lines),
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        summary_lines = [
+            f"Input: {self.input_edit.text()}",
+            f"Output: {out_folder}",
+            f"Files queued: {len(planned_actions)}",
+            "Mode: COPY (originals untouched)",
+        ]
+        if not self.confirm_batch_operation(
+            "Confirm copy operations", summary_lines, detail_lines, dry_run
+        ):
+            self.stop_processing_ui("Cancelled")
+            return
+
+        self.set_status("Copying files…" if not dry_run else "Dry run: listing copies…")
+        self.update_processing_progress(total=len(planned_actions), processed_override=0)
+        runtime_reserved: set[str] = set()
+        for idx, action in enumerate(planned_actions):
+            source = action["source"]
+            destination = action["destination"]
+            dest_dir = os.path.dirname(destination)
+            dest_name = os.path.basename(destination)
+            if dest_name in runtime_reserved:
+                dest_name = self.compute_unique_name(dest_dir, dest_name, runtime_reserved)
+                destination = os.path.join(dest_dir, dest_name)
+            if not dry_run and os.path.exists(destination):
+                dest_name = self.compute_unique_name(dest_dir, dest_name, runtime_reserved)
+                destination = os.path.join(dest_dir, dest_name)
+            runtime_reserved.add(dest_name)
+            try:
+                if not dry_run:
+                    shutil.copy2(source, destination)
+                self.log_copy_action(source, destination, dry_run=dry_run, success=True, context="RenameAll")
+                self.update_processing_progress(total=len(planned_actions), processed_override=idx + 1)
+            except Exception as e:
+                log_exception(e)
+                self.log_copy_action(source, destination, dry_run=dry_run, success=False, context="RenameAll")
                 show_friendly_error(
                     self,
                     "File error",
-                    "Renamer hit a problem while renaming one of the files.",
+                    "Renamer hit a problem while copying one of the files.",
                     traceback.format_exc(),
                     icon=QMessageBox.Icon.Warning,
                 )
                 continue
 
-        QMessageBox.information(self, "Done", "All files processed.")
+        QMessageBox.information(
+            self,
+            "Done",
+            "Dry run complete. No files were copied." if dry_run else "All files copied.",
+        )
         self.stop_processing_ui("Idle")
 
     def handle_worker_finished(self, index: int, result: dict):
