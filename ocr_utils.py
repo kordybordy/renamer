@@ -37,7 +37,7 @@ def configure_tesseract() -> str:
 
 
 def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
-    output_dir = tempfile.mkdtemp(prefix="ocr_")
+    temp_dir = tempfile.mkdtemp(prefix="ocr_")
     try:
         cmd = [
             PDFTOPPM_EXE,
@@ -49,7 +49,7 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             "-r",
             str(dpi),
             pdf_path,
-            os.path.join(output_dir, "page"),
+            os.path.join(temp_dir, "page"),
         ]
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -61,9 +61,9 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             startupinfo=startupinfo,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.png")))
+        image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.png")))
         if not image_paths:
-            image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.ppm")))
+            image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.ppm")))
 
         if not image_paths:
             raise RuntimeError(
@@ -79,7 +79,7 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
         text = "".join(text_chunks)[:char_limit]
         return text
     finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 OCR_CACHE: Dict[str, dict] = {}

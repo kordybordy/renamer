@@ -1139,7 +1139,7 @@ class RenamerGUI(QWidget):
         self.stop_event.clear()
 
         self.update_filename_for_current_row()
-        self.start_processing_ui("Renaming current file…", total=1)
+        self.start_processing_ui("Copying current file…", total=1)
 
         pdf_name = self.pdf_files[self.current_index]
         inp = os.path.join(self.input_edit.text(), pdf_name)
@@ -1160,17 +1160,17 @@ class RenamerGUI(QWidget):
         out = os.path.join(out_folder, target_name)
 
         try:
-            shutil.move(inp, out)
+            shutil.copy2(inp, out)
             if self.current_index in self.file_results:
                 self.file_results[self.current_index]["filename"] = target_name
             self.update_processing_progress(total=1, processed_override=1)
-            QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+            QMessageBox.information(self, "Done", f"Copied to:\n{out}")
         except Exception as e:
             log_exception(e)
             show_friendly_error(
                 self,
-                "Rename failed",
-                "Renamer could not move the file to the output folder.",
+                "Copy failed",
+                "Renamer could not copy the file to the output folder.",
                 traceback.format_exc(),
             )
         finally:
@@ -1192,7 +1192,7 @@ class RenamerGUI(QWidget):
             return
 
         self.stop_event.clear()
-        self.start_processing_ui("Renaming all files…", total=len(self.pdf_files))
+        self.start_processing_ui("Copying all files…", total=len(self.pdf_files))
         for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
@@ -1211,7 +1211,7 @@ class RenamerGUI(QWidget):
 
                 inp_path = os.path.join(self.input_edit.text(), pdf_name)
                 out_path = os.path.join(out_folder, target_name)
-                shutil.move(inp_path, out_path)
+                shutil.copy2(inp_path, out_path)
                 self.update_processing_progress(
                     total=len(self.pdf_files), processed_override=idx + 1
                 )
@@ -1220,13 +1220,13 @@ class RenamerGUI(QWidget):
                 show_friendly_error(
                     self,
                     "File error",
-                    "Renamer hit a problem while renaming one of the files.",
+                    "Renamer hit a problem while copying one of the files.",
                     traceback.format_exc(),
                     icon=QMessageBox.Icon.Warning,
                 )
                 continue
 
-        QMessageBox.information(self, "Done", "All files processed.")
+        QMessageBox.information(self, "Done", "All files copied.")
         self.stop_processing_ui("Idle")
 
     def handle_worker_finished(self, index: int, result: dict):
