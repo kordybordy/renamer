@@ -465,8 +465,61 @@ def normalize_target_filename(name: str) -> str:
     return name
 
 
+ROOT_PATH = os.path.abspath(os.sep)
+HOME_PATH = os.path.abspath(os.path.expanduser("~"))
+MIN_PATH_LENGTH = 10
+
+
+def _is_drive_root(path: str) -> bool:
+    normalized = os.path.abspath(path)
+    if normalized == ROOT_PATH:
+        return True
+    if os.name == "nt":
+        return bool(re.match(r"^[a-zA-Z]:\\\\?$", normalized))
+    return False
+
+
+def _is_parent_path(parent: str, child: str) -> bool:
+    try:
+        common = os.path.commonpath([parent, child])
+    except ValueError:
+        return False
+    return common == parent
+
+
+def validate_path_set(paths: List[tuple[str, str]]) -> tuple[bool, str]:
+    normalized: list[tuple[str, str]] = []
+    for label, raw_path in paths:
+        if not raw_path:
+            return False, f"{label} is empty"
+        abs_path = os.path.abspath(os.path.expanduser(raw_path))
+        if len(abs_path) <= MIN_PATH_LENGTH:
+            return False, f"{label} is too short to be safe: {abs_path}"
+        if _is_drive_root(abs_path):
+            return False, f"{label} points to a drive root: {abs_path}"
+        if abs_path == HOME_PATH:
+            return False, f"{label} points to the user home directory: {abs_path}"
+        normalized.append((label, abs_path))
+
+    for idx, (label_a, path_a) in enumerate(normalized):
+        for label_b, path_b in normalized[idx + 1 :]:
+            if path_a == path_b:
+                return False, f"{label_a} and {label_b} reference the same path: {path_a}"
+            if _is_parent_path(path_a, path_b):
+                return False, f"{label_a} is a parent of {label_b}: {path_a} -> {path_b}"
+            if _is_parent_path(path_b, path_a):
+                return False, f"{label_a} is a child of {label_b}: {path_a} -> {path_b}"
+    return True, ""
+
+
+def log_filesystem_action(operation: str, source: str, destination: str, status: str) -> None:
+    log_info(
+        f"[FS] {operation} | status={status} | source={os.path.abspath(source)} | destination={os.path.abspath(destination)}"
+    )
+
+
 def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
-    output_dir = tempfile.mkdtemp(prefix="ocr_")
+    temp_dir = tempfile.mkdtemp(prefix="ocr_")
     try:
         cmd = [
             PDFTOPPM_EXE,
@@ -478,7 +531,7 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             "-r",
             str(dpi),
             pdf_path,
-            os.path.join(output_dir, "page"),
+            os.path.join(temp_dir, "page"),
         ]
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -490,10 +543,10 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
             startupinfo=startupinfo,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.png")))
+        image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.png")))
         if not image_paths:
             # Fallback for environments where pdftoppm defaults to PPM
-            image_paths = sorted(glob.glob(os.path.join(output_dir, "page-*.ppm")))
+            image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.ppm")))
 
         if not image_paths:
             raise RuntimeError(
@@ -509,7 +562,7 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
         text = "".join(text_chunks)[:char_limit]
         return text
     finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 OCR_CACHE: Dict[str, dict] = {}
@@ -876,7 +929,10 @@ class DistributionManager:
         while os.path.exists(os.path.join(target_dir, candidate)):
             candidate = f"{base} ({counter}){ext}"
             counter += 1
-        shutil.copy2(source_path, os.path.join(target_dir, candidate))
+        destination = os.path.join(target_dir, candidate)
+        log_filesystem_action("COPY", source_path, destination, status="pending")
+        shutil.copy2(source_path, destination)
+        log_filesystem_action("COPY", source_path, destination, status="success")
         return candidate
 
 
@@ -974,6 +1030,7 @@ class DistributionWorker(QThread):
         pdf_files: List[str],
         case_index: List[CaseFolderInfo],
         csv_log_path: str | None = None,
+        dry_run: bool = False,
     ):
         super().__init__()
         self.gui_ref = gui_ref
@@ -981,6 +1038,7 @@ class DistributionWorker(QThread):
         self.pdf_files = pdf_files
         self.case_index = case_index
         self.csv_log_path = csv_log_path
+        self.dry_run = dry_run
 
     def run(self):
         processed = 0
@@ -1033,12 +1091,24 @@ class DistributionWorker(QThread):
                         log_lines.append("Note: multiple matches detected, copied to all.")
                     for match in matches:
                         try:
-                            copied_name = self.gui_ref.distribution_manager.copy_pdf(pdf_path, match.path, pdf)
+                            planned_path = self.gui_ref.plan_or_copy_file(
+                                pdf_path, match.path, pdf, dry_run=self.dry_run
+                            )
+                            copied_name = os.path.basename(planned_path)
                             csv_entries.append(
-                                (pdf, "copied", os.path.join(match.path, copied_name))
+                                (
+                                    pdf,
+                                    "planned" if self.dry_run else "copied",
+                                    os.path.join(match.path, copied_name),
+                                )
                             )
                             log_lines.append(
-                                f"Action: copied to {os.path.basename(match.path)} as {copied_name}"
+                                (
+                                    "Action: planned copy to "
+                                    if self.dry_run
+                                    else "Action: copied to "
+                                )
+                                + f"{os.path.basename(match.path)} as {copied_name}"
                             )
                         except Exception as e:
                             log_exception(e)
@@ -1062,7 +1132,7 @@ class DistributionWorker(QThread):
                 self.log_ready.emit("\n".join(log_lines))
                 processed += 1
                 self.progress.emit(processed, total, status_text)
-            if self.csv_log_path:
+            if self.csv_log_path and not self.dry_run:
                 try:
                     os.makedirs(os.path.dirname(self.csv_log_path), exist_ok=True)
                     with open(self.csv_log_path, "w", encoding="utf-8", newline="") as f:
@@ -1238,6 +1308,13 @@ class RenamerGUI(QMainWindow):
         output_row.addWidget(btn_output)
         output_col.addLayout(output_row)
         io_layout.addLayout(output_col)
+        safety_row = QHBoxLayout()
+        safety_row.setSpacing(6)
+        self.rename_dry_run_checkbox = QCheckBox("Dry run (preview copy destinations)")
+        self.rename_dry_run_checkbox.setToolTip("Plan copy operations without writing any files.")
+        safety_row.addWidget(self.rename_dry_run_checkbox)
+        safety_row.addStretch()
+        io_layout.addLayout(safety_row)
         io_group.setLayout(io_layout)
         self.main_layout.addWidget(io_group)
 
@@ -1562,6 +1639,9 @@ class RenamerGUI(QMainWindow):
         self.copy_mode_checkbox.setChecked(True)
         self.copy_mode_checkbox.setEnabled(False)
         mode_row.addWidget(self.copy_mode_checkbox)
+        self.distribution_dry_run_checkbox = QCheckBox("Dry run (preview only)")
+        self.distribution_dry_run_checkbox.setToolTip("List planned copy targets without writing files.")
+        mode_row.addWidget(self.distribution_dry_run_checkbox)
         mode_row.addStretch()
         mode_group.setLayout(mode_row)
         self.distribution_layout.addWidget(mode_group)
@@ -1875,11 +1955,80 @@ class RenamerGUI(QMainWindow):
         self.distribution_worker = None
 
     # ------------------------------------------------------
+    # Safety helpers
+    # ------------------------------------------------------
+
+    def paths_are_safe(self, paths: list[tuple[str, str]]) -> bool:
+        ok, reason = validate_path_set(paths)
+        if not ok:
+            log_info(f"[SAFETY] Blocking operation: {reason}")
+            show_friendly_error(
+                self,
+                "Unsafe path selection",
+                "The operation was stopped to protect your files.",
+                reason,
+                icon=QMessageBox.Icon.Warning,
+            )
+            return False
+        return True
+
+    def confirm_batch_summary(
+        self, title: str, details: list[str], *, dry_run: bool = False, file_count: int | None = None
+    ) -> bool:
+        summary_lines = details[:]
+        if file_count is not None:
+            summary_lines.append(f"Files queued: {file_count}")
+        summary_lines.append(
+            "Mode: DRY RUN (no files will be copied)" if dry_run else "Mode: COPY (originals stay untouched)"
+        )
+        summary_lines.append("NO FILES WILL BE DELETED.")
+        summary_lines.append("Do you want to continue?")
+        message = "\n".join(summary_lines)
+        response = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return response == QMessageBox.StandardButton.Yes
+
+    def plan_or_copy_file(
+        self, source_path: str, destination_dir: str, target_name: str, *, dry_run: bool = False
+    ) -> str:
+        if not os.path.isfile(source_path):
+            log_filesystem_action("COPY", source_path, destination_dir, status="failed_missing_source")
+            raise FileNotFoundError(f"Source file not found: {source_path}")
+        base, ext = os.path.splitext(target_name)
+        candidate = target_name
+        counter = 1
+        destination_dir = os.path.abspath(destination_dir)
+        while os.path.exists(os.path.join(destination_dir, candidate)):
+            candidate = f"{base} ({counter}){ext}"
+            counter += 1
+        final_path = os.path.join(destination_dir, candidate)
+        log_filesystem_action(
+            "COPY", source_path, final_path, status="planned (dry-run)" if dry_run else "pending"
+        )
+        if dry_run:
+            return final_path
+        os.makedirs(destination_dir, exist_ok=True)
+        try:
+            shutil.copy2(source_path, final_path)
+        except Exception as exc:  # noqa: PERF203 - explicit logging required
+            log_filesystem_action("COPY", source_path, final_path, status=f"failed: {exc}")
+            raise
+        log_filesystem_action("COPY", source_path, final_path, status="success")
+        return final_path
+
+    # ------------------------------------------------------
     # Load PDFs
     # ------------------------------------------------------
 
     def load_pdfs(self):
         folder = self.input_edit.text()
+        if not self.paths_are_safe([("Input folder", folder)]):
+            return
         if not os.path.isdir(folder):
             show_friendly_error(
                 self,
@@ -1993,6 +2142,10 @@ class RenamerGUI(QMainWindow):
     def on_distribute_clicked(self):
         input_dir = self.distribution_input_edit.text() or self.input_edit.text()
         case_root = self.case_root_edit.text()
+        if not self.paths_are_safe(
+            [("Distribution input folder", input_dir), ("Case root", case_root)]
+        ):
+            return
 
         if self.distribution_worker and self.distribution_worker.isRunning():
             show_friendly_error(
@@ -2057,12 +2210,25 @@ class RenamerGUI(QMainWindow):
             )
             return
 
+        dry_run = self.distribution_dry_run_checkbox.isChecked()
+        if not self.confirm_batch_summary(
+            "Confirm distribution",
+            [f"Input folder: {input_dir}", f"Case root: {case_root}"],
+            dry_run=dry_run,
+            file_count=len(pdf_files),
+        ):
+            self.append_distribution_log_message("[SAFETY] Distribution cancelled by user")
+            return
+
         self.distribution_log_view.clear()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.distribution_csv_log = os.path.join(
-            input_dir, f"distribution_log_{timestamp}.csv"
-        )
-        self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
+        if not dry_run:
+            self.distribution_csv_log = os.path.join(
+                input_dir, f"distribution_log_{timestamp}.csv"
+            )
+            self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
+        else:
+            self.distribution_csv_log = None
         self.start_distribution_ui(len(pdf_files))
         self.distribution_worker = DistributionWorker(
             self,
@@ -2070,6 +2236,7 @@ class RenamerGUI(QMainWindow):
             pdf_files,
             case_index,
             csv_log_path=self.distribution_csv_log,
+            dry_run=dry_run,
         )
         self.distribution_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_worker.log_ready.connect(self.handle_distribution_log)
@@ -2293,12 +2460,27 @@ class RenamerGUI(QMainWindow):
 
     def process_this_file(self):
         out_folder = self.output_edit.text()
+        input_folder = self.input_edit.text()
+        if not self.paths_are_safe(
+            [("Input folder", input_folder), ("Output folder", out_folder)]
+        ):
+            return
         if not os.path.isdir(out_folder):
             show_friendly_error(
                 self,
                 "Output folder missing",
-                "Please choose where renamed files should be saved.",
+                "Please choose where copied files should be saved.",
                 f"Checked path: {out_folder}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        if not os.path.isdir(input_folder):
+            show_friendly_error(
+                self,
+                "Input folder missing",
+                "Please choose an input folder containing your PDFs.",
+                f"Checked path: {input_folder}",
                 icon=QMessageBox.Icon.Warning,
             )
             return
@@ -2309,10 +2491,10 @@ class RenamerGUI(QMainWindow):
         self.stop_event.clear()
 
         self.update_filename_for_current_row()
-        self.start_processing_ui("Renaming current file…", total=1)
+        self.start_processing_ui("Copying current file…", total=1)
 
         pdf_name = self.pdf_files[self.current_index]
-        inp = os.path.join(self.input_edit.text(), pdf_name)
+        inp = os.path.join(input_folder, pdf_name)
 
         proposed = self.file_table.item(self.current_index, 1)
         target_name_raw = proposed.text() if proposed else self.filename_edit.text()
@@ -2327,20 +2509,28 @@ class RenamerGUI(QMainWindow):
             )
             return
 
+        dry_run = self.rename_dry_run_checkbox.isChecked()
         out = os.path.join(out_folder, target_name)
 
         try:
-            shutil.move(inp, out)
+            final_path = self.plan_or_copy_file(inp, out_folder, target_name, dry_run=dry_run)
             if self.current_index in self.file_results:
-                self.file_results[self.current_index]["filename"] = target_name
+                self.file_results[self.current_index]["filename"] = os.path.basename(final_path)
             self.update_processing_progress(total=1, processed_override=1)
-            QMessageBox.information(self, "Done", f"Renamed:\n{out}")
+            if dry_run:
+                QMessageBox.information(
+                    self,
+                    "Dry run complete",
+                    f"Planned copy path:\n{final_path}\n\nNO FILES WERE COPIED.",
+                )
+            else:
+                QMessageBox.information(self, "Done", f"Copied to:\n{final_path}")
         except Exception as e:
             log_exception(e)
             show_friendly_error(
                 self,
-                "Rename failed",
-                "Renamer could not move the file to the output folder.",
+                "Copy failed",
+                "Renamer could not copy the file to the output folder.",
                 traceback.format_exc(),
             )
         finally:
@@ -2348,12 +2538,27 @@ class RenamerGUI(QMainWindow):
 
     def process_all_files_safe(self):
         out_folder = self.output_edit.text()
+        input_folder = self.input_edit.text()
+        if not self.paths_are_safe(
+            [("Input folder", input_folder), ("Output folder", out_folder)]
+        ):
+            return
         if not os.path.isdir(out_folder):
             show_friendly_error(
                 self,
                 "Output folder missing",
-                "Please choose where renamed files should be saved.",
+                "Please choose where copied files should be saved.",
                 f"Checked path: {out_folder}",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        if not os.path.isdir(input_folder):
+            show_friendly_error(
+                self,
+                "Input folder missing",
+                "Please choose an input folder containing your PDFs.",
+                f"Checked path: {input_folder}",
                 icon=QMessageBox.Icon.Warning,
             )
             return
@@ -2361,8 +2566,18 @@ class RenamerGUI(QMainWindow):
         if not self.pdf_files:
             return
 
+        dry_run = self.rename_dry_run_checkbox.isChecked()
+        if not self.confirm_batch_summary(
+            "Confirm batch copy",
+            [f"Input folder: {input_folder}", f"Output folder: {out_folder}"],
+            dry_run=dry_run,
+            file_count=len(self.pdf_files),
+        ):
+            self.append_status_message("[SAFETY] Batch copy cancelled by user")
+            return
+
         self.stop_event.clear()
-        self.start_processing_ui("Renaming all files…", total=len(self.pdf_files))
+        self.start_processing_ui("Copying all files…", total=len(self.pdf_files))
         for idx, pdf_name in enumerate(self.pdf_files[:]):
             try:
                 result = self.file_results.get(idx)
@@ -2379,9 +2594,12 @@ class RenamerGUI(QMainWindow):
                     raise ValueError(f"Empty or invalid filename for {pdf_name}")
                 self.file_results[idx]["filename"] = target_name
 
-                inp_path = os.path.join(self.input_edit.text(), pdf_name)
-                out_path = os.path.join(out_folder, target_name)
-                shutil.move(inp_path, out_path)
+                inp_path = os.path.join(input_folder, pdf_name)
+                planned_path = self.plan_or_copy_file(
+                    inp_path, out_folder, target_name, dry_run=dry_run
+                )
+                prefix = "[DRY-RUN]" if dry_run else "[COPY]"
+                self.append_status_message(f"{prefix} {pdf_name} → {planned_path}")
                 self.update_processing_progress(
                     total=len(self.pdf_files), processed_override=idx + 1
                 )
@@ -2390,42 +2608,24 @@ class RenamerGUI(QMainWindow):
                 show_friendly_error(
                     self,
                     "File error",
-                    "Renamer hit a problem while renaming one of the files.",
+                    "Renamer hit a problem while copying one of the files.",
                     traceback.format_exc(),
                     icon=QMessageBox.Icon.Warning,
                 )
                 continue
 
-        QMessageBox.information(self, "Done", "All files processed.")
+        if dry_run:
+            QMessageBox.information(
+                self,
+                "Dry run complete",
+                "Planned copy destinations are listed in the status panel.\n\nNO FILES WERE COPIED.",
+            )
+        else:
+            QMessageBox.information(self, "Done", "All files copied.")
         self.stop_processing_ui("Idle")
 
     def process_all(self):
-        out_folder = self.output_edit.text()
-        if not os.path.isdir(out_folder):
-            show_friendly_error(
-                self,
-                "Output folder missing",
-                "Please choose where renamed files should be saved.",
-                f"Checked path: {out_folder}",
-                icon=QMessageBox.Icon.Warning,
-            )
-            return
-
-        if not self.pdf_files:
-            return
-
-        for idx, pdf_name in enumerate(self.pdf_files[:]):  # iterate over COPY
-            result = self.file_results.get(idx)
-            if result is None:
-                result = self.generate_result_for_index(idx)
-                self.file_results[idx] = result
-            self.apply_cached_result(idx, result)
-
-            inp = os.path.join(self.input_edit.text(), pdf_name)
-            out = os.path.join(out_folder, self.filename_edit.text())
-            shutil.move(inp, out)
-
-        QMessageBox.information(self, "Done", "All files processed.")
+        self.process_all_files_safe()
 
     # Helpers
     def handle_worker_finished(self, index: int, result: dict):
