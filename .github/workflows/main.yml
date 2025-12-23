@@ -1,0 +1,60 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install Poppler and Tesseract (Chocolatey)
+        run: |
+          choco install poppler tesseract -y
+
+      - name: Prepare OCR binaries for PyInstaller
+        run: |
+          mkdir poppler
+          mkdir tesseract
+
+          xcopy "C:\ProgramData\chocolatey\lib\poppler\tools\*" "poppler\" /E /I /Y
+          xcopy "C:\ProgramData\chocolatey\lib\tesseract\tools\*" "tesseract\" /E /I /Y
+
+      - name: Build EXE with PyInstaller
+        run: |
+          python -m PyInstaller `
+            --onefile `
+            --windowed `
+            --name Renamer `
+            --icon assets\logo.ico `
+            --clean `
+            --noconfirm `
+            --add-data "assets;assets" `
+            --add-data "retro.qss;." `
+            --add-data "poppler;poppler" `
+            --add-data "tesseract;tesseract" `
+            main.py
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Renamer-Windows
+          path: dist/Renamer.exe
