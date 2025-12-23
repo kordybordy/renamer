@@ -21,7 +21,7 @@ def main():
         app.setWindowIcon(QIcon(icon_file))
 
     gui = RenamerGUI()
-    if os.path.exists(icon_file):
+    if icon_file and os.path.exists(icon_file):
         gui.setWindowIcon(QIcon(icon_file))
     gui.show()
 
