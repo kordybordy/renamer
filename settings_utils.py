@@ -26,7 +26,13 @@ def load_settings(gui):
         except json.JSONDecodeError:
             saved_custom = {}
     if isinstance(saved_custom, dict):
-        gui.custom_elements = saved_custom
+        normalized_custom = {}
+        for key, payload in saved_custom.items():
+            if isinstance(payload, dict):
+                normalized_custom[key] = payload
+            else:
+                normalized_custom[key] = {"label": str(payload), "default": str(payload)}
+        gui.custom_elements = normalized_custom
         gui.refresh_custom_elements_ui()
     saved_template = settings.value("template", [])
     if isinstance(saved_template, str):
