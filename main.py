@@ -1031,6 +1031,8 @@ class DistributionWorker(QThread):
         case_index: List[CaseFolderInfo],
         csv_log_path: str | None = None,
         dry_run: bool = False,
+        options: NamingOptions | None = None,
+        backend: str | None = None,
     ):
         super().__init__()
         self.gui_ref = gui_ref
@@ -1039,6 +1041,8 @@ class DistributionWorker(QThread):
         self.case_index = case_index
         self.csv_log_path = csv_log_path
         self.dry_run = dry_run
+        self.options = options
+        self.backend = backend
 
     def run(self):
         processed = 0
@@ -1051,7 +1055,15 @@ class DistributionWorker(QThread):
                 self.progress.emit(processed, total, status_text)
                 log_lines = [f"PDF: {pdf}"]
                 try:
-                    result = self.gui_ref.get_or_generate_distribution_result(pdf_path, pdf)
+                    if self.options and self.backend:
+                        self.log_ready.emit(f"Starting OCR/AI for {pdf}")
+                    result = self.gui_ref.get_or_generate_distribution_result(
+                        pdf_path,
+                        pdf,
+                        options=self.options,
+                        backend=self.backend,
+                        input_dir=self.input_dir,
+                    )
                 except Exception as e:
                     log_exception(e)
                     log_lines.append("Status: error while extracting defendants")
@@ -2092,12 +2104,23 @@ class RenamerGUI(QMainWindow):
         names = self.parse_defendant_field(source_meta.get("defendant"))
         return names
 
-    def get_or_generate_distribution_result(self, pdf_path: str, filename: str) -> dict:
+    def get_or_generate_distribution_result(
+        self,
+        pdf_path: str,
+        filename: str,
+        *,
+        options: NamingOptions | None = None,
+        backend: str | None = None,
+        input_dir: str | None = None,
+    ) -> dict:
         if pdf_path in self.distribution_meta_cache:
             return self.distribution_meta_cache[pdf_path]
 
+        options = options or self.build_options()
+        backend = backend or self.get_ai_backend()
+        input_dir = input_dir or self.input_edit.text()
         try:
-            if os.path.abspath(os.path.dirname(pdf_path)) == os.path.abspath(self.input_edit.text()):
+            if os.path.abspath(os.path.dirname(pdf_path)) == os.path.abspath(input_dir):
                 if filename in self.pdf_files:
                     idx = self.pdf_files.index(filename)
                     cached = self.file_results.get(idx)
@@ -2112,9 +2135,7 @@ class RenamerGUI(QMainWindow):
         except Exception as e:
             log_exception(e)
 
-        options = self.build_options()
         requirements = requirements_from_template(options.template_elements, options.custom_elements)
-        self.log_activity(f"[Distribution] Running OCR/AI for '{filename}'")
         ocr_text = ""
         try:
             if options.ocr_enabled:
@@ -2128,7 +2149,7 @@ class RenamerGUI(QMainWindow):
             log_exception(e)
             ocr_text = ""
 
-        raw_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode) or {}
+        raw_meta = extract_metadata_ai(ocr_text, backend, options.custom_elements, options.turbo_mode) or {}
         if not raw_meta.get("defendant"):
             fallback_defendant = defendant_from_filename(filename)
             if fallback_defendant:
@@ -2229,6 +2250,8 @@ class RenamerGUI(QMainWindow):
             self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
         else:
             self.distribution_csv_log = None
+        options_snapshot = self.build_options()
+        backend = self.get_ai_backend()
         self.start_distribution_ui(len(pdf_files))
         self.distribution_worker = DistributionWorker(
             self,
@@ -2237,6 +2260,8 @@ class RenamerGUI(QMainWindow):
             case_index,
             csv_log_path=self.distribution_csv_log,
             dry_run=dry_run,
+            options=options_snapshot,
+            backend=backend,
         )
         self.distribution_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_worker.log_ready.connect(self.handle_distribution_log)
