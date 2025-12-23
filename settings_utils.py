@@ -1,9 +1,7 @@
 import json
+import os
 
 from config import FILENAME_RULES, DEFAULT_TEMPLATE_ELEMENTS
-
-
-import os
 
 
 def load_settings(gui):
@@ -21,6 +19,15 @@ def load_settings(gui):
     defendant_order = settings.value("defendant_surname_first", default_order)
     gui.plaintiff_order_combo.setCurrentIndex(0 if str(plaintiff_order).lower() == "true" else 1)
     gui.defendant_order_combo.setCurrentIndex(0 if str(defendant_order).lower() == "true" else 1)
+    saved_custom = settings.value("custom_elements", {})
+    if isinstance(saved_custom, str):
+        try:
+            saved_custom = json.loads(saved_custom)
+        except json.JSONDecodeError:
+            saved_custom = {}
+    if isinstance(saved_custom, dict):
+        gui.custom_elements = saved_custom
+        gui.refresh_custom_elements_ui()
     saved_template = settings.value("template", [])
     if isinstance(saved_template, str):
         saved_template = json.loads(saved_template) if saved_template else []
@@ -41,6 +48,7 @@ def save_settings(gui):
     gui.settings.setValue("case_root_folder", gui.case_root_edit.text())
     gui.settings.setValue("template", gui.get_template_elements())
     gui.settings.setValue("turbo_mode", gui.turbo_mode_checkbox.isChecked())
+    gui.settings.setValue("custom_elements", gui.custom_elements)
     gui.settings.setValue(
         "plaintiff_surname_first", bool(gui.plaintiff_order_combo.currentData())
     )

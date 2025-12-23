@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import threading
 import traceback
@@ -41,6 +42,7 @@ from text_utils import (
     build_filename,
     normalize_target_filename,
     normalize_polish,
+    parse_defendants_from_filename,
     requirements_from_template,
 )
 
@@ -66,6 +68,7 @@ def show_friendly_error(
 @dataclass
 class NamingOptions:
     template_elements: list[str]
+    custom_defaults: dict[str, str]
     ocr_enabled: bool
     ocr_char_limit: int
     ocr_dpi: int
@@ -93,7 +96,9 @@ class FileProcessWorker(QThread):
         self.options = options
         self.stop_event = stop_event
         self.backend = backend
-        self.requirements = requirements_from_template(options.template_elements)
+        self.requirements = requirements_from_template(
+            options.template_elements, options.custom_defaults
+        )
 
     def run(self):
         try:
@@ -117,12 +122,27 @@ class FileProcessWorker(QThread):
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            ai_meta = extract_metadata_ai(ocr_text, self.backend, self.options.turbo_mode)
+            ai_meta = extract_metadata_ai(
+                ocr_text,
+                self.backend,
+                self.options.turbo_mode,
+                self.requirements,
+                self.options.custom_defaults,
+            )
+            if not ai_meta:
+                fallback_defendants = parse_defendants_from_filename(self.pdf_path)
+                if fallback_defendants:
+                    ai_meta = {"defendant": ", ".join(fallback_defendants)}
+                    log_info(
+                        f"[Worker {self.index + 1}] AI empty; using filename defendants: {ai_meta['defendant']}"
+                    )
             meta = ai_meta or {}
             defaults_applied = [
                 key for key in self.requirements if key not in meta or not meta.get(key)
             ]
-            meta = apply_meta_defaults(meta, self.requirements)
+            meta = apply_meta_defaults(
+                meta, self.requirements, custom_defaults=self.options.custom_defaults
+            )
             meta = apply_party_order(
                 meta,
                 plaintiff_surname_first=self.options.plaintiff_surname_first,
@@ -151,6 +171,7 @@ class FileProcessWorker(QThread):
                 {
                     "ocr_text": ocr_text,
                     "meta": meta,
+                    "raw_meta": ai_meta or {},
                     "filename": filename,
                     "char_count": len(ocr_text),
                 },
@@ -272,6 +293,7 @@ class RenamerGUI(QWidget):
         self.distribution_manager = DistributionManager(normalize_polish)
         self.distribution_meta_cache: Dict[str, dict] = {}
         self.distribution_worker: DistributionWorker | None = None
+        self.custom_elements: Dict[str, Dict[str, str]] = {}
 
         self.preview_value = QLabel("—")
         self.preview_value.setStyleSheet("font-weight: 600;")
@@ -287,8 +309,10 @@ class RenamerGUI(QWidget):
             header.addWidget(logo_label)
         title_col = QVBoxLayout()
         title_label = QLabel("Renamer")
+        title_label.setObjectName("TitleLabel")
         title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
         subtitle_label = QLabel("Smart document naming")
+        subtitle_label.setObjectName("Subtitle")
         subtitle_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
         title_col.addWidget(title_label)
         title_col.addWidget(subtitle_label)
@@ -354,14 +378,27 @@ class RenamerGUI(QWidget):
         dist_controls.addWidget(self.distribute_button)
         self.distribution_layout.addLayout(dist_controls)
 
-        self.distribution_layout.addWidget(QLabel("Distribution log:"))
+        log_toggle_row = QHBoxLayout()
+        self.log_toggle = QCheckBox("Show Status Log")
+        self.log_toggle.toggled.connect(self.toggle_distribution_log)
+        log_toggle_row.addWidget(self.log_toggle)
+        log_toggle_row.addStretch()
+        self.distribution_layout.addLayout(log_toggle_row)
+
+        self.distribution_log_container = QWidget()
+        dist_log_layout = QVBoxLayout()
+        dist_log_layout.setContentsMargins(0, 0, 0, 0)
+        dist_log_layout.addWidget(QLabel("Distribution log:"))
         self.distribution_log_view = QTextEdit()
         self.distribution_log_view.setReadOnly(True)
         self.distribution_log_view.setPlaceholderText(
             "Processing details will appear here. Copies are logged to disk as well."
         )
         self.distribution_log_view.setMinimumHeight(200)
-        self.distribution_layout.addWidget(self.distribution_log_view)
+        dist_log_layout.addWidget(self.distribution_log_view)
+        self.distribution_log_container.setLayout(dist_log_layout)
+        self.distribution_log_container.setVisible(False)
+        self.distribution_layout.addWidget(self.distribution_log_container)
 
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("Input folder:"))
@@ -382,8 +419,8 @@ class RenamerGUI(QWidget):
         self.main_layout.addLayout(h2)
 
         play_row = QHBoxLayout()
-        self.play_button = QPushButton("▶ Generate")
-        self.play_button.setStyleSheet("font-size: 16px; padding: 12px; font-weight: bold;")
+        self.play_button = QPushButton("▶ Generate Filenames")
+        self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
         play_row.addStretch()
         play_row.addWidget(self.play_button)
@@ -432,11 +469,31 @@ class RenamerGUI(QWidget):
         self.template_selector.addItem("Plaintiff", "plaintiff")
         self.template_selector.addItem("Defendant", "defendant")
         self.template_selector.addItem("Letter type", "letter_type")
+        self.template_selector.addItem("Case number", "case_number")
         selector_row.addWidget(self.template_selector)
         add_template_btn = QPushButton("Add element")
         add_template_btn.clicked.connect(self.add_template_element)
         selector_row.addWidget(add_template_btn)
         selector_col.addLayout(selector_row)
+
+        custom_row = QHBoxLayout()
+        self.custom_label_edit = QLineEdit()
+        self.custom_label_edit.setPlaceholderText("Custom element label")
+        custom_row.addWidget(self.custom_label_edit)
+        self.custom_default_edit = QLineEdit()
+        self.custom_default_edit.setPlaceholderText("Default value")
+        custom_row.addWidget(self.custom_default_edit)
+        add_custom_btn = QPushButton("Add custom element")
+        add_custom_btn.clicked.connect(self.add_custom_element)
+        custom_row.addWidget(add_custom_btn)
+        selector_col.addLayout(custom_row)
+
+        self.custom_elements_list = QListWidget()
+        self.custom_elements_list.setMaximumHeight(90)
+        selector_col.addWidget(self.custom_elements_list)
+        remove_custom_btn = QPushButton("Remove selected custom element")
+        remove_custom_btn.clicked.connect(self.remove_custom_element)
+        selector_col.addWidget(remove_custom_btn)
 
         template_builder.addLayout(selector_col)
 
@@ -530,14 +587,13 @@ class RenamerGUI(QWidget):
         h4.addWidget(self.filename_edit)
         self.main_layout.addLayout(h4)
 
-        preview_row = QHBoxLayout()
-        preview_label = QLabel("Live preview:")
-        preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        preview_row.addWidget(preview_label)
-        preview_row.addWidget(self.preview_value)
-        preview_row.addStretch()
-        self.main_layout.addLayout(preview_row)
+        self.ocr_toggle = QCheckBox("Show OCR excerpt")
+        self.ocr_toggle.toggled.connect(self.toggle_ocr_preview)
+        self.main_layout.addWidget(self.ocr_toggle)
 
+        self.ocr_preview_container = QWidget()
+        ocr_container_layout = QVBoxLayout()
+        ocr_container_layout.setContentsMargins(0, 0, 0, 0)
         self.ocr_preview_label = QLabel("OCR text sent to AI:")
         self.ocr_preview_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
         self.ocr_preview = QTextEdit()
@@ -546,20 +602,26 @@ class RenamerGUI(QWidget):
             "The OCR excerpt forwarded to the AI/backend will appear here."
         )
         self.ocr_preview.setMinimumHeight(140)
-        self.main_layout.addWidget(self.ocr_preview_label)
-        self.main_layout.addWidget(self.ocr_preview)
+        ocr_container_layout.addWidget(self.ocr_preview_label)
+        ocr_container_layout.addWidget(self.ocr_preview)
+        self.ocr_preview_container.setLayout(ocr_container_layout)
+        self.ocr_preview_container.setVisible(False)
+        self.main_layout.addWidget(self.ocr_preview_container)
 
         h5 = QHBoxLayout()
 
-        btn_process = QPushButton("✎ Rename File")
+        btn_process = QPushButton("✎ Rename Selected")
+        btn_process.setObjectName("PrimaryButton")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
 
         btn_all = QPushButton("⏩ Rename All")
+        btn_all.setObjectName("PrimaryButton")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
 
         btn_quit = QPushButton("Quit")
+        btn_quit.setObjectName("DangerButton")
         btn_quit.clicked.connect(self.close)
 
         h5.addWidget(btn_process)
@@ -673,7 +735,13 @@ class RenamerGUI(QWidget):
         self.distribution_progress.setValue(0)
 
     def check_ollama_status(self):
-        if self.backend_combo.currentIndex() != 1:
+        mode = self.backend_combo.currentIndex()
+        if mode == 0:
+            self.ollama_badge.setText("☁️ Cloud (OpenAI)")
+            self.ollama_badge.setStyleSheet("color: #00CCFF;")
+            return
+        try_auto = mode == 2
+        if mode not in (1, 2):
             self.ollama_badge.setText("")
             return
         try:
@@ -681,12 +749,20 @@ class RenamerGUI(QWidget):
             ok = resp.status_code == 200
         except Exception:
             ok = False
-        if ok:
-            self.ollama_badge.setText("🟢 Connected")
-            self.ollama_badge.setStyleSheet("color: #7CFC00;")
+        if mode == 1:
+            if ok:
+                self.ollama_badge.setText("🟢 Local AI ready")
+                self.ollama_badge.setStyleSheet("color: #7CFC00;")
+            else:
+                self.ollama_badge.setText("🔴 Local AI offline")
+                self.ollama_badge.setStyleSheet("color: #FF6B6B;")
         else:
-            self.ollama_badge.setText("🔴 Offline")
-            self.ollama_badge.setStyleSheet("color: #FF6B6B;")
+            if ok:
+                self.ollama_badge.setText("🌀 Auto: local → cloud (local ready)")
+                self.ollama_badge.setStyleSheet("color: #F1C40F;")
+            else:
+                self.ollama_badge.setText("🌀 Auto: local offline, will use cloud")
+                self.ollama_badge.setStyleSheet("color: #F39C12;")
 
     def choose_input(self):
         try:
@@ -856,7 +932,7 @@ class RenamerGUI(QWidget):
             log_exception(e)
 
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_defaults)
         self.log_activity(f"[Distribution] Running OCR/AI for '{filename}'")
         ocr_text = ""
         try:
@@ -871,8 +947,18 @@ class RenamerGUI(QWidget):
             log_exception(e)
             ocr_text = ""
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
-        meta = apply_meta_defaults(ai_meta or {}, requirements)
+        ai_meta = extract_metadata_ai(
+            ocr_text,
+            self.get_ai_backend(),
+            options.turbo_mode,
+            requirements,
+            options.custom_defaults,
+        )
+        if not ai_meta:
+            fallback_defendants = parse_defendants_from_filename(pdf_path)
+            if fallback_defendants:
+                ai_meta = {"defendant": ", ".join(fallback_defendants)}
+        meta = apply_meta_defaults(ai_meta or {}, requirements, custom_defaults=options.custom_defaults)
         meta = apply_party_order(
             meta,
             plaintiff_surname_first=options.plaintiff_surname_first,
@@ -968,6 +1054,7 @@ class RenamerGUI(QWidget):
     def build_options(self) -> NamingOptions:
         return NamingOptions(
             template_elements=self.get_template_elements(),
+            custom_defaults=self.get_custom_defaults(),
             ocr_enabled=self.run_ocr_checkbox.isChecked(),
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
@@ -983,14 +1070,79 @@ class RenamerGUI(QWidget):
             "plaintiff": "Plaintiff",
             "defendant": "Defendant",
             "letter_type": "Letter type",
+            "case_number": "Case number",
         }
+        if element in self.custom_elements:
+            label = self.custom_elements[element].get("label") or element
+            return f"{label} (custom)"
         return mapping.get(element, element)
+
+    def normalize_custom_key(self, label: str) -> str:
+        key = re.sub(r"[^a-zA-Z0-9_]+", "_", label.strip()).strip("_").lower() or "custom"
+        base = key
+        counter = 1
+        while key in self.custom_elements:
+            key = f"{base}_{counter}"
+            counter += 1
+        return key
 
     def add_template_item(self, element: str, refresh: bool = True):
         item = QListWidgetItem(self.display_name_for_element(element))
         item.setData(Qt.ItemDataRole.UserRole, element)
         self.template_list.addItem(item)
         if refresh:
+            self.update_preview()
+
+    def refresh_custom_elements_ui(self):
+        self.custom_elements_list.clear()
+        for key, payload in self.custom_elements.items():
+            label = payload.get("label") or key
+            default = payload.get("default", "")
+            item = QListWidgetItem(f"{label} → {default or '—'}")
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.custom_elements_list.addItem(item)
+        existing_keys = {self.template_selector.itemData(i) for i in range(self.template_selector.count())}
+        for key in list(existing_keys):
+            if key in ("date", "plaintiff", "defendant", "letter_type", "case_number"):
+                continue
+            if key not in self.custom_elements:
+                idx = [i for i in range(self.template_selector.count()) if self.template_selector.itemData(i) == key]
+                if idx:
+                    self.template_selector.removeItem(idx[0])
+        for key, payload in self.custom_elements.items():
+            if key not in existing_keys:
+                self.template_selector.addItem(payload.get("label") or key, key)
+
+    def add_custom_element(self):
+        label = self.custom_label_edit.text().strip()
+        default_value = self.custom_default_edit.text().strip()
+        if not label:
+            show_friendly_error(
+                self,
+                "Custom element missing label",
+                "Enter a label before adding a custom element.",
+                "No label provided.",
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+        key = self.normalize_custom_key(label)
+        self.custom_elements[key] = {"label": label, "default": default_value or label}
+        self.custom_label_edit.clear()
+        self.custom_default_edit.clear()
+        self.refresh_custom_elements_ui()
+
+    def remove_custom_element(self):
+        item = self.custom_elements_list.currentItem()
+        if not item:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if key in self.custom_elements:
+            self.custom_elements.pop(key, None)
+            for idx in range(self.template_list.count() - 1, -1, -1):
+                entry = self.template_list.item(idx)
+                if entry.data(Qt.ItemDataRole.UserRole) == key:
+                    self.template_list.takeItem(idx)
+            self.refresh_custom_elements_ui()
             self.update_preview()
 
     def add_template_element(self):
@@ -1004,6 +1156,14 @@ class RenamerGUI(QWidget):
         if row >= 0:
             self.template_list.takeItem(row)
             self.update_preview()
+
+    def get_custom_defaults(self) -> dict[str, str]:
+        template_elements = set(self.get_template_elements())
+        filtered: dict[str, str] = {}
+        for key, payload in self.custom_elements.items():
+            if key in template_elements:
+                filtered[key] = payload.get("default", "")
+        return filtered
 
     def get_template_elements(self) -> list[str]:
         elements: list[str] = []
@@ -1024,6 +1184,14 @@ class RenamerGUI(QWidget):
         if hasattr(self, "ocr_preview"):
             self.ocr_preview.setPlainText(text or "")
 
+    def toggle_ocr_preview(self, checked: bool):
+        if hasattr(self, "ocr_preview_container"):
+            self.ocr_preview_container.setVisible(bool(checked))
+
+    def toggle_distribution_log(self, checked: bool):
+        if hasattr(self, "distribution_log_container"):
+            self.distribution_log_container.setVisible(bool(checked))
+
     def update_preview(self):
         if not getattr(self, "ui_ready", False):
             return
@@ -1031,8 +1199,8 @@ class RenamerGUI(QWidget):
         meta = self.meta or {}
         if self.current_index in self.file_results:
             meta = self.file_results[self.current_index].get("meta", meta)
-        requirements = requirements_from_template(options.template_elements)
-        meta = apply_meta_defaults(meta, requirements)
+        requirements = requirements_from_template(options.template_elements, options.custom_defaults)
+        meta = apply_meta_defaults(meta, requirements, custom_defaults=options.custom_defaults)
         meta = apply_party_order(
             meta,
             plaintiff_surname_first=options.plaintiff_surname_first,
@@ -1287,7 +1455,7 @@ class RenamerGUI(QWidget):
         pdf = self.pdf_files[index]
         pdf_path = os.path.join(self.input_edit.text(), pdf)
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements)
+        requirements = requirements_from_template(options.template_elements, options.custom_defaults)
         self.log_activity(
             f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
             f"char_limit={options.ocr_char_limit}, backend={self.get_ai_backend()})"
@@ -1306,10 +1474,20 @@ class RenamerGUI(QWidget):
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        ai_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.turbo_mode)
+        ai_meta = extract_metadata_ai(
+            ocr_text,
+            self.get_ai_backend(),
+            options.turbo_mode,
+            requirements,
+            options.custom_defaults,
+        )
+        if not ai_meta:
+            fallback_defendants = parse_defendants_from_filename(pdf_path)
+            if fallback_defendants:
+                ai_meta = {"defendant": ", ".join(fallback_defendants)}
         meta = ai_meta or {}
         defaults_applied = [key for key in requirements if key not in meta or not meta.get(key)]
-        meta = apply_meta_defaults(meta, requirements)
+        meta = apply_meta_defaults(meta, requirements, custom_defaults=options.custom_defaults)
         meta = apply_party_order(
             meta,
             plaintiff_surname_first=options.plaintiff_surname_first,
@@ -1329,6 +1507,7 @@ class RenamerGUI(QWidget):
         return {
             "ocr_text": ocr_text,
             "meta": meta,
+            "raw_meta": ai_meta or {},
             "filename": filename,
             "char_count": len(ocr_text),
         }
