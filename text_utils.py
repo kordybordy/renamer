@@ -164,17 +164,24 @@ def apply_party_order(meta: dict, *, plaintiff_surname_first: bool, defendant_su
     return meta
 
 
-def requirements_from_template(template: list[str]) -> dict:
-    return {
+def requirements_from_template(template: list[str], custom_defaults: dict[str, str] | None = None) -> dict:
+    custom_defaults = custom_defaults or {}
+    requirements = {
         "plaintiff": True if "plaintiff" in template else False,
         "defendant": True if "defendant" in template else False,
         "letter_type": True if "letter_type" in template else False,
         "date": True if "date" in template else False,
+        "case_number": True if "case_number" in template else False,
     }
+    for element in template:
+        if element not in requirements:
+            requirements[element] = True
+    return requirements
 
 
-def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
+def apply_meta_defaults(meta: dict, requirements: dict, *, custom_defaults: dict[str, str] | None = None) -> dict:
     meta = meta.copy()
+    custom_defaults = custom_defaults or {}
     if requirements.get("date") and "date" not in meta:
         meta["date"] = datetime.now().strftime("%Y-%m-%d")
     if requirements.get("letter_type"):
@@ -183,6 +190,11 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("plaintiff", "Plaintiff")
     if requirements.get("defendant"):
         meta.setdefault("defendant", "Defendant")
+    if requirements.get("case_number"):
+        meta.setdefault("case_number", "Case-Unknown")
+    for key, default_value in custom_defaults.items():
+        if requirements.get(key):
+            meta.setdefault(key, default_value or key.title())
     return meta
 
 
@@ -199,3 +211,24 @@ def build_filename(meta: dict, template_elements: list[str]) -> str:
         filename = "document"
     filename = normalize_target_filename(filename)
     return filename
+
+
+def parse_defendants_from_filename(filename: str) -> list[str]:
+    name_without_ext = os.path.splitext(os.path.basename(filename))[0]
+    cleaned = re.sub(r"[_\-]", " ", name_without_ext)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    fragments = re.split(r"(?i)\bvs\.?\b|\bcontra\b|\bvs\b", cleaned)
+    candidates: list[str] = []
+    for fragment in fragments:
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        words = fragment.split(" ")
+        if len(words) >= 2:
+            normalized = normalize_person_to_given_surname(" ".join(words[:2])) or " ".join(words[:2])
+            candidates.append(normalized)
+    unique: list[str] = []
+    for cand in candidates:
+        if cand and cand not in unique:
+            unique.append(cand)
+    return unique

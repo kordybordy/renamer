@@ -7,6 +7,11 @@ from urllib.parse import urljoin
 API_KEY = "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"
 # ----------------------------------------------------------
 
+if getattr(sys, "frozen", False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 AI_BACKEND_DEFAULT = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", urljoin(OLLAMA_HOST, "api/generate"))
@@ -53,97 +58,32 @@ Rules:
 LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_error.log")
 DISTRIBUTION_LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_distribution.log")
 
-ACCENT_COLOR = "#4F7CFF"
-BACKGROUND_COLOR = "#1E1E1E"
-PANEL_COLOR = "#252526"
-TEXT_PRIMARY = "#FFFFFF"
-TEXT_SECONDARY = "#B0B0B0"
-BORDER_COLOR = "#333333"
+ACCENT_COLOR = "#00FF66"
+BACKGROUND_COLOR = "#000000"
+PANEL_COLOR = "#000000"
+TEXT_PRIMARY = "#00FF66"
+TEXT_SECONDARY = "#00CC55"
+BORDER_COLOR = "#00FF66"
 
-GLOBAL_STYLESHEET = f"""
+
+def load_stylesheet() -> str:
+    retro_path = os.path.join(BASE_DIR, "retro.qss")
+    try:
+        with open(retro_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return f"""
 * {{
     font-family: 'Segoe UI', sans-serif;
     color: {TEXT_PRIMARY};
 }}
-
 QWidget {{
     background-color: {BACKGROUND_COLOR};
 }}
-
-QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QSpinBox {{
-    background-color: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-radius: 6px;
-    padding: 6px;
-    color: {TEXT_PRIMARY};
-}}
-
-QLabel {{
-    color: {TEXT_PRIMARY};
-}}
-
-QTabWidget::pane {{
-    border: 1px solid {BORDER_COLOR};
-    background: {PANEL_COLOR};
-    border-radius: 10px;
-    padding: 6px;
-}}
-
-QTabBar::tab {{
-    background: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-bottom: none;
-    padding: 8px 16px;
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
-    margin-right: 4px;
-}}
-
-QTabBar::tab:selected {{
-    background: {ACCENT_COLOR};
-    color: {TEXT_PRIMARY};
-}}
-
-QTabBar::tab:hover {{
-    border-color: {ACCENT_COLOR};
-}}
-
-QPushButton {{
-    background-color: {ACCENT_COLOR};
-    border: 1px solid {ACCENT_COLOR};
-    color: {TEXT_PRIMARY};
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-weight: 600;
-}}
-
-QPushButton:hover {{
-    box-shadow: 0 0 8px {ACCENT_COLOR};
-}}
-
-QPushButton:disabled {{
-    background-color: {BORDER_COLOR};
-    border-color: {BORDER_COLOR};
-    color: {TEXT_SECONDARY};
-}}
-
-QProgressBar {{
-    background: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-radius: 6px;
-    text-align: center;
-}}
-
-QProgressBar::chunk {{
-    background-color: {ACCENT_COLOR};
-    border-radius: 6px;
-}}
 """
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = sys._MEIPASS
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+GLOBAL_STYLESHEET = load_stylesheet()
 
 POPPLER_PATH = os.path.join(BASE_DIR, "poppler", "Library", "bin")
 PDFTOPPM_EXE = os.path.join(POPPLER_PATH, "pdftoppm.exe")
