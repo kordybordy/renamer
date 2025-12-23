@@ -299,29 +299,48 @@ class RenamerGUI(QWidget):
         self.preview_value.setStyleSheet("font-weight: 600;")
 
         root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(12, 10, 12, 12)
+        root_layout.setSpacing(8)
 
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 4)
+        header.setSpacing(8)
+        self.logo_pixmap: QPixmap | None = None
         logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
         pixmap = QPixmap(logo_path)
         if not pixmap.isNull():
-            logo_label = QLabel()
-            logo_label.setPixmap(pixmap.scaled(QSize(40, 40), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            header.addWidget(logo_label)
+            self.logo_pixmap = pixmap
         title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(6)
+        if self.logo_pixmap:
+            logo_label = QLabel()
+            logo_label.setPixmap(
+                self.logo_pixmap.scaled(
+                    QSize(28, 28),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            title_row.addWidget(logo_label)
         title_label = QLabel("Renamer")
         title_label.setObjectName("TitleLabel")
         title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
+        title_row.addWidget(title_label)
+        title_row.addStretch()
         subtitle_label = QLabel("Smart document naming")
         subtitle_label.setObjectName("Subtitle")
         subtitle_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        title_col.addWidget(title_label)
+        title_col.addLayout(title_row)
         title_col.addWidget(subtitle_label)
-        title_col.addStretch()
         header.addLayout(title_col)
         header.addStretch()
         root_layout.addLayout(header)
 
         self.tabs = QTabWidget()
+        self.tabs.setContentsMargins(0, 0, 0, 0)
         self.main_tab = QWidget()
         self.settings_tab = QWidget()
         self.distribution_tab = QWidget()
@@ -420,6 +439,17 @@ class RenamerGUI(QWidget):
 
         play_row = QHBoxLayout()
         self.play_button = QPushButton("▶ Generate Filenames")
+        if self.logo_pixmap:
+            self.play_button.setIcon(
+                QIcon(
+                    self.logo_pixmap.scaled(
+                        QSize(16, 16),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+            )
+            self.play_button.setIconSize(QSize(16, 16))
         self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
         play_row.addStretch()
