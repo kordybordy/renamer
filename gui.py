@@ -1095,23 +1095,22 @@ class RenamerGUI(QWidget):
 
     def refresh_custom_elements_ui(self):
         self.custom_elements_list.clear()
-        for key, payload in self.custom_elements.items():
+        sorted_custom = sorted(
+            self.custom_elements.items(),
+            key=lambda kv: (kv[1].get("label") or kv[0]).lower(),
+        )
+        for key, payload in sorted_custom:
             label = payload.get("label") or key
             default = payload.get("default", "")
             item = QListWidgetItem(f"{label} → {default or '—'}")
             item.setData(Qt.ItemDataRole.UserRole, key)
             self.custom_elements_list.addItem(item)
-        existing_keys = {self.template_selector.itemData(i) for i in range(self.template_selector.count())}
-        for key in list(existing_keys):
-            if key in ("date", "plaintiff", "defendant", "letter_type", "case_number"):
-                continue
-            if key not in self.custom_elements:
-                idx = [i for i in range(self.template_selector.count()) if self.template_selector.itemData(i) == key]
-                if idx:
-                    self.template_selector.removeItem(idx[0])
-        for key, payload in self.custom_elements.items():
-            if key not in existing_keys:
-                self.template_selector.addItem(payload.get("label") or key, key)
+        base_keys = {"date", "plaintiff", "defendant", "letter_type", "case_number"}
+        for idx in range(self.template_selector.count() - 1, -1, -1):
+            if self.template_selector.itemData(idx) not in base_keys:
+                self.template_selector.removeItem(idx)
+        for key, payload in sorted_custom:
+            self.template_selector.addItem(payload.get("label") or key, key)
 
     def add_custom_element(self):
         label = self.custom_label_edit.text().strip()
