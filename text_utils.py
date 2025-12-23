@@ -18,8 +18,9 @@ def normalize_polish(text: str) -> str:
         "ź": "z",
     })
     normalized = (text or "").lower()
-    normalized = normalized.translate(mapping)
+    normalized = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = normalized.translate(mapping)
     return normalized
 
 
