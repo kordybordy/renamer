@@ -38,15 +38,20 @@ jobs:
           xcopy "C:\ProgramData\chocolatey\lib\poppler\tools\*" "poppler\" /E /I /Y
           xcopy "C:\ProgramData\chocolatey\lib\tesseract\tools\*" "tesseract\" /E /I /Y
 
-      - name: Build EXE with PyInstaller
-        run: >
-          python -m PyInstaller --onefile --windowed --name Renamer
-          --icon assets\logo.ico --clean --noconfirm
-          --add-data "assets;assets"
-          --add-data "retro.qss;."
-          --add-data "poppler;poppler"
-          --add-data "tesseract;tesseract"
-          main.py
+       - name: Build EXE with PyInstaller
+        run: |
+          python -m PyInstaller `
+            --onefile `
+            --windowed `
+            --name Renamer `
+            --icon assets\logo.ico `
+            --clean `
+            --noconfirm `
+            --add-data "assets;assets" `
+            --add-data "retro.qss;." `
+            --add-data "poppler;poppler" `
+            --add-data "tesseract;tesseract" `
+            main.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
