@@ -32,7 +32,9 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", urljoin(OLLAMA_HOST, "api/generate"))
 
 from openai import OpenAI
-client = OpenAI(api_key=API_KEY)
+
+API_KEY = os.environ.get("OPENAI_API_KEY", "")
+client = OpenAI(api_key=API_KEY) if API_KEY else None
 
 # ===============================
 # FILENAME POLICY
@@ -533,6 +535,9 @@ def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
 
 def call_openai_model(text: str, prompt: str) -> str:
     """Call OpenAI with fallback models, returning the raw content."""
+
+    if client is None:
+        raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY")
 
     try:
         resp = client.chat.completions.create(
