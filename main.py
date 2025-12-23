@@ -224,6 +224,16 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def load_stylesheet() -> str:
+    retro_path = os.path.join(BASE_DIR, "retro.qss")
+    if os.path.exists(retro_path):
+        try:
+            with open(retro_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            log_exception(e)
+    return GLOBAL_STYLESHEET
+
 # ===============================
 # POPPLER (GLOBAL!)
 # ===============================
@@ -2612,7 +2622,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Renamer")
     app.setApplicationDisplayName("Renamer")
-    app.setStyleSheet(GLOBAL_STYLESHEET)
+    app.setStyleSheet(load_stylesheet())
 
     logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
