@@ -6,12 +6,11 @@ import subprocess
 import tempfile
 import glob
 import threading
-import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urljoin
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List
 
 from PIL import Image
 import pytesseract
@@ -19,13 +18,18 @@ import pytesseract
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QLineEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
-    QCheckBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QCheckBox, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
     QButtonGroup, QPlainTextEdit, QToolButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
+
+from distribution.engine import DistributionConfig, DistributionEngine
+from distribution.models import DistributionPlanItem
+from distribution.scorer import DEFAULT_STOPWORDS
+from distribution.safety import validate_distribution_paths
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
@@ -875,68 +879,6 @@ def build_filename(meta: dict, options: NamingOptions) -> str:
     return filename
 
 
-@dataclass
-class CaseFolderInfo:
-    path: str
-    tokens: List[str]
-    full: str
-
-
-class DistributionManager:
-    def __init__(self, normalizer: Callable[[str], str]):
-        self.normalizer = normalizer
-
-    def build_case_index(self, case_root: str) -> List[CaseFolderInfo]:
-        entries: List[CaseFolderInfo] = []
-        for name in os.listdir(case_root):
-            full_path = os.path.join(case_root, name)
-            if not os.path.isdir(full_path):
-                continue
-            normalized = self.normalizer(name)
-            tokens = [tok for tok in normalized.split(" ") if tok]
-            entries.append(CaseFolderInfo(path=full_path, tokens=tokens, full=normalized))
-        return entries
-
-    def _defendant_tokens(self, defendant: str) -> Tuple[List[str], str]:
-        normalized = self.normalizer(defendant)
-        tokens = [tok for tok in normalized.split(" ") if tok]
-        surname = tokens[-1] if tokens else ""
-        return tokens, surname
-
-    def find_matches(self, defendants: List[str], case_index: List[CaseFolderInfo]) -> List[CaseFolderInfo]:
-        normalized_defendants = []
-        for defendant in defendants:
-            tokens, surname = self._defendant_tokens(defendant)
-            if tokens:
-                normalized_defendants.append((tokens, surname))
-
-        matches: Dict[str, CaseFolderInfo] = {}
-        for folder in case_index:
-            folder_token_set = set(folder.tokens)
-            for tokens, surname in normalized_defendants:
-                if surname and surname in folder_token_set:
-                    matches.setdefault(folder.path, folder)
-                    break
-                if surname and folder_token_set.issuperset(tokens):
-                    matches.setdefault(folder.path, folder)
-                    break
-        return list(matches.values())
-
-    def copy_pdf(self, source_path: str, target_dir: str, filename: str) -> str:
-        base, ext = os.path.splitext(filename)
-        candidate = filename
-        counter = 1
-        os.makedirs(target_dir, exist_ok=True)
-        while os.path.exists(os.path.join(target_dir, candidate)):
-            candidate = f"{base} ({counter}){ext}"
-            counter += 1
-        destination = os.path.join(target_dir, candidate)
-        log_filesystem_action("COPY", source_path, destination, status="pending")
-        shutil.copy2(source_path, destination)
-        log_filesystem_action("COPY", source_path, destination, status="success")
-        return candidate
-
-
 class FileProcessWorker(QThread):
     finished = pyqtSignal(int, dict)
     failed = pyqtSignal(int, Exception)
@@ -1019,145 +961,96 @@ class FileProcessWorker(QThread):
             self.failed.emit(self.index, e)
 
 
-class DistributionWorker(QThread):
+class DistributionPlanWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    log_ready = pyqtSignal(str)
+    plan_ready = pyqtSignal(list)
+    finished = pyqtSignal()
+
+    def __init__(
+        self,
+        *,
+        input_dir: str,
+        pdf_files: List[str],
+        case_root: str,
+        config: DistributionConfig,
+        ai_provider: str,
+    ):
+        super().__init__()
+        self.input_dir = input_dir
+        self.pdf_files = pdf_files
+        self.case_root = case_root
+        self.config = config
+        self.ai_provider = ai_provider
+
+    def run(self):
+        try:
+            engine = DistributionEngine(
+                input_folder=self.input_dir,
+                case_root=self.case_root,
+                config=self.config,
+                ai_provider=self.ai_provider,
+                logger=self.log_ready.emit,
+            )
+            plan = engine.plan_distribution(
+                self.pdf_files,
+                progress_cb=lambda processed, total, status: self.progress.emit(
+                    processed, total, status
+                ),
+            )
+            self.plan_ready.emit(plan)
+        except Exception as e:
+            log_exception(e)
+            self.log_ready.emit(f"Unexpected error during planning: {e}")
+        finally:
+            self.finished.emit()
+
+
+class DistributionApplyWorker(QThread):
     progress = pyqtSignal(int, int, str)
     log_ready = pyqtSignal(str)
     finished = pyqtSignal()
 
     def __init__(
         self,
-        gui_ref,
+        *,
         input_dir: str,
-        pdf_files: List[str],
-        case_index: List[CaseFolderInfo],
-        csv_log_path: str | None = None,
-        dry_run: bool = False,
-        options: NamingOptions | None = None,
-        backend: str | None = None,
+        case_root: str,
+        config: DistributionConfig,
+        ai_provider: str,
+        plan: List[DistributionPlanItem],
+        auto_only: bool,
+        audit_log_path: str,
     ):
         super().__init__()
-        self.gui_ref = gui_ref
         self.input_dir = input_dir
-        self.pdf_files = pdf_files
-        self.case_index = case_index
-        self.csv_log_path = csv_log_path
-        self.dry_run = dry_run
-        self.options = options
-        self.backend = backend
+        self.case_root = case_root
+        self.config = config
+        self.ai_provider = ai_provider
+        self.plan = plan
+        self.auto_only = auto_only
+        self.audit_log_path = audit_log_path
 
     def run(self):
-        processed = 0
-        total = len(self.pdf_files)
         try:
-            csv_entries: list[tuple[str, str, str]] = []
-            for pdf in self.pdf_files:
-                pdf_path = os.path.join(self.input_dir, pdf)
-                status_text = f"Processing {pdf}"
-                self.progress.emit(processed, total, status_text)
-                log_lines = [f"PDF: {pdf}"]
-                try:
-                    if self.options and self.backend:
-                        self.log_ready.emit(f"Starting OCR/AI for {pdf}")
-                    result = self.gui_ref.get_or_generate_distribution_result(
-                        pdf_path,
-                        pdf,
-                        options=self.options,
-                        backend=self.backend,
-                        input_dir=self.input_dir,
-                    )
-                except Exception as e:
-                    log_exception(e)
-                    log_lines.append("Status: error while extracting defendants")
-                    self.log_ready.emit("\n".join(log_lines))
-                    processed += 1
-                    self.progress.emit(processed, total, f"{status_text} (error)")
-                    continue
-
-                raw_meta = result.get("raw_meta") or result.get("meta") or {}
-                log_lines.append(f"Raw defendant field value: {raw_meta.get('defendant')!r}")
-                defendants = self.gui_ref.get_defendants_from_result(result)
-                if defendants:
-                    log_lines.append(f"Defendants: {', '.join(defendants)}")
-                    primary_defendant = defendants[0]
-                    for defendant in defendants:
-                        tokens, surname = self.gui_ref.distribution_manager._defendant_tokens(defendant)
-                        log_lines.append(
-                            f"Normalized defendant '{defendant}': tokens={tokens}, surname={surname}"
-                        )
-                else:
-                    log_lines.append("Defendants: none detected (parsed list is empty)")
-                    primary_defendant = "—"
-
-                status_text = f"Processing {pdf} → {primary_defendant}"
-                matches: List[CaseFolderInfo] = []
-                if defendants:
-                    try:
-                        matches = self.gui_ref.distribution_manager.find_matches(defendants, self.case_index)
-                    except Exception as e:
-                        log_exception(e)
-
-                if matches:
-                    log_lines.append("Matched folders:")
-                    for match in matches:
-                        log_lines.append(f" - {os.path.basename(match.path)}")
-                    if len(matches) > 1:
-                        log_lines.append("Note: multiple matches detected, copied to all.")
-                    for match in matches:
-                        try:
-                            planned_path = self.gui_ref.plan_or_copy_file(
-                                pdf_path, match.path, pdf, dry_run=self.dry_run
-                            )
-                            copied_name = os.path.basename(planned_path)
-                            csv_entries.append(
-                                (
-                                    pdf,
-                                    "planned" if self.dry_run else "copied",
-                                    os.path.join(match.path, copied_name),
-                                )
-                            )
-                            log_lines.append(
-                                (
-                                    "Action: planned copy to "
-                                    if self.dry_run
-                                    else "Action: copied to "
-                                )
-                                + f"{os.path.basename(match.path)} as {copied_name}"
-                            )
-                        except Exception as e:
-                            log_exception(e)
-                            log_lines.append(
-                                f"Action: failed to copy to {os.path.basename(match.path)} ({e})"
-                            )
-                            csv_entries.append(
-                                (pdf, "copy_failed", f"{os.path.basename(match.path)}: {e}")
-                            )
-                else:
-                    candidate_surnames = [
-                        self.gui_ref.distribution_manager._defendant_tokens(name)[1]
-                        for name in defendants
-                        if name
-                    ]
-                    log_lines.append(
-                        f"Status: no matching case folder found (checked {len(self.case_index)} folders; surnames tried={candidate_surnames})"
-                    )
-                    csv_entries.append((pdf, "no_match", ""))
-
-                self.log_ready.emit("\n".join(log_lines))
-                processed += 1
-                self.progress.emit(processed, total, status_text)
-            if self.csv_log_path and not self.dry_run:
-                try:
-                    os.makedirs(os.path.dirname(self.csv_log_path), exist_ok=True)
-                    with open(self.csv_log_path, "w", encoding="utf-8", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["file", "status", "target_or_error"])
-                        writer.writerows(csv_entries)
-                except Exception as e:
-                    log_exception(e)
-                    self.log_ready.emit(f"Failed to write CSV log: {e}")
+            engine = DistributionEngine(
+                input_folder=self.input_dir,
+                case_root=self.case_root,
+                config=self.config,
+                ai_provider=self.ai_provider,
+                logger=self.log_ready.emit,
+            )
+            engine.apply_plan(
+                self.plan,
+                auto_only=self.auto_only,
+                audit_log_path=self.audit_log_path,
+                progress_cb=lambda processed, total, status: self.progress.emit(
+                    processed, total, status
+                ),
+            )
         except Exception as e:
             log_exception(e)
-            self.log_ready.emit(f"Unexpected error during distribution: {e}")
+            self.log_ready.emit(f"Unexpected error during apply: {e}")
         finally:
             self.finished.emit()
 
@@ -1181,10 +1074,10 @@ class RenamerGUI(QMainWindow):
         self.max_parallel_workers = 3
         self.stop_event = threading.Event()
         self.ui_ready = False
-        self.distribution_manager = DistributionManager(normalize_polish)
-        self.distribution_meta_cache: Dict[str, dict] = {}
-        self.distribution_worker: DistributionWorker | None = None
-        self.distribution_csv_log: str | None = None
+        self.distribution_plan: list[DistributionPlanItem] = []
+        self.distribution_plan_worker: DistributionPlanWorker | None = None
+        self.distribution_apply_worker: DistributionApplyWorker | None = None
+        self.distribution_audit_log_path: str | None = None
         self.custom_elements: dict[str, str] = {}
 
         central_widget = QWidget()
@@ -1543,6 +1436,69 @@ class RenamerGUI(QMainWindow):
         order_layout.addLayout(defendant_col)
         order_group.setLayout(order_layout)
         controls_layout.addWidget(order_group)
+
+        distribution_group = QGroupBox("DISTRIBUTION SETTINGS")
+        distribution_layout = QVBoxLayout()
+        distribution_layout.setSpacing(6)
+
+        auto_threshold_col = QVBoxLayout()
+        auto_threshold_col.setSpacing(6)
+        auto_threshold_col.addWidget(QLabel("Auto threshold (score):"))
+        self.distribution_auto_threshold_spin = QSpinBox()
+        self.distribution_auto_threshold_spin.setRange(0, 200)
+        self.distribution_auto_threshold_spin.setValue(70)
+        auto_threshold_col.addWidget(self.distribution_auto_threshold_spin)
+        distribution_layout.addLayout(auto_threshold_col)
+
+        gap_threshold_col = QVBoxLayout()
+        gap_threshold_col.setSpacing(6)
+        gap_threshold_col.addWidget(QLabel("Gap threshold (score):"))
+        self.distribution_gap_threshold_spin = QSpinBox()
+        self.distribution_gap_threshold_spin.setRange(0, 200)
+        self.distribution_gap_threshold_spin.setValue(15)
+        gap_threshold_col.addWidget(self.distribution_gap_threshold_spin)
+        distribution_layout.addLayout(gap_threshold_col)
+
+        ai_threshold_col = QVBoxLayout()
+        ai_threshold_col.setSpacing(6)
+        ai_threshold_col.addWidget(QLabel("AI confidence threshold:"))
+        self.distribution_ai_threshold_spin = QDoubleSpinBox()
+        self.distribution_ai_threshold_spin.setRange(0.0, 1.0)
+        self.distribution_ai_threshold_spin.setSingleStep(0.05)
+        self.distribution_ai_threshold_spin.setValue(0.7)
+        ai_threshold_col.addWidget(self.distribution_ai_threshold_spin)
+        distribution_layout.addLayout(ai_threshold_col)
+
+        topk_col = QVBoxLayout()
+        topk_col.setSpacing(6)
+        topk_col.addWidget(QLabel("Top-K candidates:"))
+        self.distribution_topk_spin = QSpinBox()
+        self.distribution_topk_spin.setRange(3, 50)
+        self.distribution_topk_spin.setValue(15)
+        topk_col.addWidget(self.distribution_topk_spin)
+        distribution_layout.addLayout(topk_col)
+
+        unmatched_col = QVBoxLayout()
+        unmatched_col.setSpacing(6)
+        unmatched_col.addWidget(QLabel("Unmatched policy:"))
+        self.distribution_unmatched_combo = QComboBox()
+        self.distribution_unmatched_combo.addItem("Leave in place", "leave")
+        self.distribution_unmatched_combo.addItem("Copy to UNMATCHED folder", "unmatched_folder")
+        unmatched_col.addWidget(self.distribution_unmatched_combo)
+        distribution_layout.addLayout(unmatched_col)
+
+        stopwords_col = QVBoxLayout()
+        stopwords_col.setSpacing(6)
+        stopwords_col.addWidget(QLabel("Stopwords (comma-separated):"))
+        self.distribution_stopwords_edit = QLineEdit()
+        self.distribution_stopwords_edit.setPlaceholderText(
+            "sp, spółka, sa, s.a, ag, z.o.o, oddzial, bank, international"
+        )
+        stopwords_col.addWidget(self.distribution_stopwords_edit)
+        distribution_layout.addLayout(stopwords_col)
+
+        distribution_group.setLayout(distribution_layout)
+        controls_layout.addWidget(distribution_group)
         controls_layout.addStretch()
         controls_group.setLayout(controls_layout)
         self.settings_layout.addWidget(controls_group, 1)
@@ -1652,9 +1608,16 @@ class RenamerGUI(QMainWindow):
         self.copy_mode_checkbox.setChecked(True)
         self.copy_mode_checkbox.setEnabled(False)
         mode_row.addWidget(self.copy_mode_checkbox)
-        self.distribution_dry_run_checkbox = QCheckBox("Dry run (preview only)")
-        self.distribution_dry_run_checkbox.setToolTip("List planned copy targets without writing files.")
-        mode_row.addWidget(self.distribution_dry_run_checkbox)
+        self.allow_home_case_root_checkbox = QCheckBox("Allow case root under home folder")
+        self.allow_home_case_root_checkbox.setToolTip(
+            "Unchecked = extra safety guard. Check only if you want to use a case root inside your home folder."
+        )
+        mode_row.addWidget(self.allow_home_case_root_checkbox)
+        self.auto_apply_checkbox = QCheckBox("Auto apply high-confidence only")
+        self.auto_apply_checkbox.setToolTip(
+            "Apply only AUTO/AI items that meet confidence thresholds."
+        )
+        mode_row.addWidget(self.auto_apply_checkbox)
         mode_row.addStretch()
         mode_group.setLayout(mode_row)
         self.distribution_layout.addWidget(mode_group)
@@ -1670,12 +1633,37 @@ class RenamerGUI(QMainWindow):
         self.distribution_progress.setValue(0)
         self.distribution_progress.setTextVisible(True)
         dist_controls.addWidget(self.distribution_progress)
-        self.distribute_button = QPushButton("EXECUTE DISTRIBUTION")
+        self.distribute_button = QPushButton("RUN DRY RUN")
         self.distribute_button.setObjectName("PrimaryButton")
         self.distribute_button.clicked.connect(self.on_distribute_clicked)
         dist_controls.addWidget(self.distribute_button)
+        self.apply_distribution_button = QPushButton("APPLY PLAN")
+        self.apply_distribution_button.setEnabled(False)
+        self.apply_distribution_button.clicked.connect(self.on_apply_distribution_clicked)
+        dist_controls.addWidget(self.apply_distribution_button)
         dist_controls_group.setLayout(dist_controls)
         self.distribution_layout.addWidget(dist_controls_group)
+
+        plan_group = QGroupBox("DISTRIBUTION PLAN")
+        plan_layout = QVBoxLayout()
+        plan_layout.setSpacing(6)
+        plan_layout.setContentsMargins(12, 12, 12, 12)
+        self.distribution_plan_table = QTableWidget(0, 5)
+        self.distribution_plan_table.setHorizontalHeaderLabels(
+            ["PDF", "Decision", "Chosen folder", "Confidence", "Select folder (ASK)"]
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.distribution_plan_table.setEditTriggers(
+            self.distribution_plan_table.EditTrigger.NoEditTriggers
+        )
+        plan_layout.addWidget(self.distribution_plan_table)
+        plan_group.setLayout(plan_layout)
+        self.distribution_layout.addWidget(plan_group)
 
         log_group = QGroupBox("DISTRIBUTION LOG")
         log_layout = QVBoxLayout()
@@ -1750,6 +1738,26 @@ class RenamerGUI(QMainWindow):
         defendant_order_bool = str(defendant_order).lower() == "true"
         self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
         self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
+        auto_threshold = self.settings.value("distribution_auto_threshold", 70)
+        gap_threshold = self.settings.value("distribution_gap_threshold", 15)
+        ai_threshold = self.settings.value("distribution_ai_threshold", 0.7)
+        top_k = self.settings.value("distribution_top_k", 15)
+        unmatched_policy = self.settings.value("distribution_unmatched_policy", "leave")
+        stopwords = self.settings.value(
+            "distribution_stopwords", ", ".join(DEFAULT_STOPWORDS)
+        )
+        allow_home = self.settings.value("distribution_allow_home_case_root", False)
+        auto_apply = self.settings.value("distribution_auto_apply", False)
+        self.distribution_auto_threshold_spin.setValue(int(auto_threshold))
+        self.distribution_gap_threshold_spin.setValue(int(gap_threshold))
+        self.distribution_ai_threshold_spin.setValue(float(ai_threshold))
+        self.distribution_topk_spin.setValue(int(top_k))
+        unmatched_index = self.distribution_unmatched_combo.findData(str(unmatched_policy))
+        if unmatched_index >= 0:
+            self.distribution_unmatched_combo.setCurrentIndex(unmatched_index)
+        self.distribution_stopwords_edit.setText(str(stopwords))
+        self.allow_home_case_root_checkbox.setChecked(str(allow_home).lower() == "true")
+        self.auto_apply_checkbox.setChecked(str(auto_apply).lower() == "true")
         saved_custom = self.settings.value("custom_elements", "{}")
         try:
             self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
@@ -1782,6 +1790,28 @@ class RenamerGUI(QMainWindow):
         )
         self.settings.setValue(
             "defendant_surname_first", bool(self.defendant_order_combo.currentData())
+        )
+        self.settings.setValue(
+            "distribution_auto_threshold", self.distribution_auto_threshold_spin.value()
+        )
+        self.settings.setValue(
+            "distribution_gap_threshold", self.distribution_gap_threshold_spin.value()
+        )
+        self.settings.setValue(
+            "distribution_ai_threshold", self.distribution_ai_threshold_spin.value()
+        )
+        self.settings.setValue("distribution_top_k", self.distribution_topk_spin.value())
+        self.settings.setValue(
+            "distribution_unmatched_policy", self.distribution_unmatched_combo.currentData()
+        )
+        self.settings.setValue(
+            "distribution_stopwords", self.distribution_stopwords_edit.text()
+        )
+        self.settings.setValue(
+            "distribution_allow_home_case_root", self.allow_home_case_root_checkbox.isChecked()
+        )
+        self.settings.setValue(
+            "distribution_auto_apply", self.auto_apply_checkbox.isChecked()
         )
 
     def closeEvent(self, event):
@@ -1833,6 +1863,7 @@ class RenamerGUI(QMainWindow):
 
     def start_distribution_ui(self, total: int):
         self.distribute_button.setDisabled(True)
+        self.apply_distribution_button.setDisabled(True)
         self.distribution_input_button.setDisabled(True)
         self.case_root_button.setDisabled(True)
         for btn in (self.play_button, self.btn_process, self.btn_all):
@@ -1845,6 +1876,7 @@ class RenamerGUI(QMainWindow):
         self.distribute_button.setDisabled(False)
         self.distribution_input_button.setDisabled(False)
         self.case_root_button.setDisabled(False)
+        self.apply_distribution_button.setEnabled(bool(self.distribution_plan))
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(False)
         self.distribution_status_label.setText(status)
@@ -1957,15 +1989,30 @@ class RenamerGUI(QMainWindow):
     def handle_distribution_log(self, message: str):
         self.append_distribution_log_message(message)
 
+    def handle_distribution_plan_ready(self, plan: list[DistributionPlanItem]):
+        self.distribution_plan = plan
+        self.update_distribution_plan_table(plan)
+        self.apply_distribution_button.setEnabled(bool(plan))
+        if plan:
+            self.append_distribution_log_message(
+                f"Plan ready: {len(plan)} files. Review ASK rows before applying."
+            )
+
     def handle_distribution_finished(self):
         self.distribution_status_label.setText("Finished")
         if self.distribution_progress.maximum() > 0:
             self.distribution_progress.setValue(self.distribution_progress.maximum())
         self.stop_distribution_ui("Finished")
-        QMessageBox.information(self, "Distribution complete", "Finished distributing PDFs.")
-        if self.distribution_csv_log and os.path.exists(self.distribution_csv_log):
-            self.append_distribution_log_message(f"CSV log saved to: {self.distribution_csv_log}")
-        self.distribution_worker = None
+        if self.distribution_apply_worker:
+            QMessageBox.information(self, "Distribution complete", "Finished applying the plan.")
+            if self.distribution_audit_log_path:
+                self.append_distribution_log_message(
+                    f"Audit log saved to: {self.distribution_audit_log_path}"
+                )
+            self.distribution_apply_worker = None
+        else:
+            QMessageBox.information(self, "Distribution complete", "Finished building the plan.")
+        self.distribution_plan_worker = None
 
     # ------------------------------------------------------
     # Safety helpers
@@ -2085,91 +2132,102 @@ class RenamerGUI(QMainWindow):
     # Distribution helpers
     # ------------------------------------------------------
 
-    def parse_defendant_field(self, value) -> list[str]:
-        names: list[str] = []
-        if isinstance(value, str):
-            names = [part.strip() for part in value.split(",") if part.strip()]
-        elif isinstance(value, list):
-            names = [str(item).strip() for item in value if str(item).strip()]
-        cleaned: list[str] = []
-        for name in names:
-            lower_name = name.lower()
-            if lower_name == "defendant":
-                continue
-            if name not in cleaned:
-                cleaned.append(name)
-        return cleaned
+    def build_distribution_config(self) -> DistributionConfig:
+        raw_stopwords = self.distribution_stopwords_edit.text()
+        stopwords = [word.strip() for word in raw_stopwords.split(",") if word.strip()]
+        if not stopwords:
+            stopwords = DEFAULT_STOPWORDS[:]
+        return DistributionConfig(
+            auto_threshold=float(self.distribution_auto_threshold_spin.value()),
+            gap_threshold=float(self.distribution_gap_threshold_spin.value()),
+            ai_threshold=float(self.distribution_ai_threshold_spin.value()),
+            top_k=int(self.distribution_topk_spin.value()),
+            stopwords=stopwords,
+            unmatched_policy=str(self.distribution_unmatched_combo.currentData()),
+        )
 
-    def get_defendants_from_result(self, result: dict) -> list[str]:
-        source_meta = result.get("raw_meta") or result.get("meta") or {}
-        names = self.parse_defendant_field(source_meta.get("defendant"))
-        return names
+    def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):
+        self.distribution_plan_table.setRowCount(0)
+        self.distribution_plan_table.setRowCount(len(plan))
+        for row, item in enumerate(plan):
+            filename = os.path.basename(item.source_pdf)
+            chosen_name = os.path.basename(item.chosen_folder) if item.chosen_folder else "—"
+            self.distribution_plan_table.setItem(row, 0, QTableWidgetItem(filename))
+            self.distribution_plan_table.setItem(row, 1, QTableWidgetItem(item.decision))
+            self.distribution_plan_table.setItem(row, 2, QTableWidgetItem(chosen_name))
+            self.distribution_plan_table.setItem(
+                row, 3, QTableWidgetItem(f"{item.confidence:.2f}")
+            )
 
-    def get_or_generate_distribution_result(
-        self,
-        pdf_path: str,
-        filename: str,
-        *,
-        options: NamingOptions | None = None,
-        backend: str | None = None,
-        input_dir: str | None = None,
-    ) -> dict:
-        if pdf_path in self.distribution_meta_cache:
-            return self.distribution_meta_cache[pdf_path]
+            chooser = QComboBox()
+            top_candidates = item.candidates[:5]
+            if item.decision == "ASK" and top_candidates:
+                chooser.addItem("Skip", "")
+                for candidate in top_candidates:
+                    chooser.addItem(
+                        f"{candidate.folder.folder_name} ({candidate.score:.1f})",
+                        candidate.folder.folder_path,
+                    )
+                chooser.setEnabled(True)
+            elif item.chosen_folder:
+                chooser.addItem(chosen_name, item.chosen_folder)
+                chooser.setEnabled(False)
+            else:
+                chooser.addItem("—", "")
+                chooser.setEnabled(False)
 
-        options = options or self.build_options()
-        backend = backend or self.get_ai_backend()
-        input_dir = input_dir or self.input_edit.text()
-        try:
-            if os.path.abspath(os.path.dirname(pdf_path)) == os.path.abspath(input_dir):
-                if filename in self.pdf_files:
-                    idx = self.pdf_files.index(filename)
-                    cached = self.file_results.get(idx)
-                    if cached:
-                        result = {
-                            "meta": cached.get("meta", {}),
-                            "raw_meta": cached.get("raw_meta", cached.get("meta", {})),
-                            "ocr_text": cached.get("ocr_text", ""),
-                        }
-                        self.distribution_meta_cache[pdf_path] = result
-                        return result
-        except Exception as e:
-            log_exception(e)
+            self.distribution_plan_table.setCellWidget(row, 4, chooser)
 
-        requirements = requirements_from_template(options.template_elements, options.custom_elements)
-        ocr_text = ""
-        try:
-            if options.ocr_enabled:
-                ocr_text = get_ocr_text(
-                    pdf_path,
-                    options.ocr_char_limit,
-                    options.ocr_dpi,
-                    options.ocr_pages,
+        self.distribution_plan_table.resizeRowsToContents()
+
+    def collect_plan_for_apply(self) -> list[DistributionPlanItem]:
+        updated_plan: list[DistributionPlanItem] = []
+        for row, item in enumerate(self.distribution_plan):
+            chooser = self.distribution_plan_table.cellWidget(row, 4)
+            selected_path = ""
+            if isinstance(chooser, QComboBox):
+                selected_path = str(chooser.currentData() or "")
+            if item.decision == "ASK":
+                chosen_folder = selected_path or None
+            else:
+                chosen_folder = item.chosen_folder
+            updated_plan.append(
+                DistributionPlanItem(
+                    source_pdf=item.source_pdf,
+                    chosen_folder=chosen_folder,
+                    candidates=item.candidates,
+                    decision=item.decision,
+                    confidence=item.confidence,
+                    reason=item.reason,
+                    dest_path=item.dest_path,
                 )
-        except Exception as e:
-            log_exception(e)
-            ocr_text = ""
-
-        raw_meta = extract_metadata_ai(ocr_text, backend, options.custom_elements, options.turbo_mode) or {}
-        if not raw_meta.get("defendant"):
-            fallback_defendant = defendant_from_filename(filename)
-            if fallback_defendant:
-                raw_meta["defendant"] = fallback_defendant
-        meta = apply_meta_defaults(raw_meta, requirements)
-        meta = apply_party_order(meta, options)
-        result = {"meta": meta, "raw_meta": raw_meta, "ocr_text": ocr_text}
-        self.distribution_meta_cache[pdf_path] = result
-        return result
+            )
+        return updated_plan
 
     def on_distribute_clicked(self):
         input_dir = self.distribution_input_edit.text() or self.input_edit.text()
         case_root = self.case_root_edit.text()
-        if not self.paths_are_safe(
-            [("Distribution input folder", input_dir), ("Case root", case_root)]
-        ):
+        allow_home = self.allow_home_case_root_checkbox.isChecked()
+        ok, reason = validate_distribution_paths(
+            input_dir, case_root, allow_home_case_root=allow_home
+        )
+        if not ok:
+            show_friendly_error(
+                self,
+                "Unsafe distribution paths",
+                "Renamer blocked this distribution plan for safety.",
+                reason,
+                icon=QMessageBox.Icon.Warning,
+            )
             return
 
-        if self.distribution_worker and self.distribution_worker.isRunning():
+        if (
+            self.distribution_plan_worker
+            and self.distribution_plan_worker.isRunning()
+        ) or (
+            self.distribution_apply_worker
+            and self.distribution_apply_worker.isRunning()
+        ):
             show_friendly_error(
                 self,
                 "Distribution in progress",
@@ -2198,6 +2256,17 @@ class RenamerGUI(QMainWindow):
                 icon=QMessageBox.Icon.Warning,
             )
             return
+        if not any(
+            os.path.isdir(os.path.join(case_root, name)) for name in os.listdir(case_root)
+        ):
+            show_friendly_error(
+                self,
+                "No case folders",
+                "Renamer did not find any case folders inside the selected root.",
+                f"Checked path: {case_root}",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
 
         pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".pdf")]
         if not pdf_files:
@@ -2210,64 +2279,110 @@ class RenamerGUI(QMainWindow):
             )
             return
 
-        try:
-            case_index = self.distribution_manager.build_case_index(case_root)
-        except Exception as e:
-            log_exception(e)
-            show_friendly_error(
-                self,
-                "Case root error",
-                "Renamer could not read the case folders.",
-                traceback.format_exc(),
-            )
-            return
-
-        if not case_index:
-            show_friendly_error(
-                self,
-                "No case folders",
-                "Renamer did not find any case folders inside the selected root.",
-                f"Checked path: {case_root}",
-                icon=QMessageBox.Icon.Information,
-            )
-            return
-
-        dry_run = self.distribution_dry_run_checkbox.isChecked()
         if not self.confirm_batch_summary(
-            "Confirm distribution",
+            "Confirm distribution plan",
             [f"Input folder: {input_dir}", f"Case root: {case_root}"],
-            dry_run=dry_run,
+            dry_run=True,
             file_count=len(pdf_files),
         ):
             self.append_distribution_log_message("[SAFETY] Distribution cancelled by user")
             return
 
         self.distribution_log_view.clear()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if not dry_run:
-            self.distribution_csv_log = os.path.join(
-                input_dir, f"distribution_log_{timestamp}.csv"
-            )
-            self.append_status_message(f"[DISTRIBUTE] Logging to {self.distribution_csv_log}")
-        else:
-            self.distribution_csv_log = None
-        options_snapshot = self.build_options()
+        self.distribution_plan_table.setRowCount(0)
+        self.apply_distribution_button.setEnabled(False)
+        self.distribution_plan = []
+        config = self.build_distribution_config()
         backend = self.get_ai_backend()
         self.start_distribution_ui(len(pdf_files))
-        self.distribution_worker = DistributionWorker(
-            self,
-            input_dir,
-            pdf_files,
-            case_index,
-            csv_log_path=self.distribution_csv_log,
-            dry_run=dry_run,
-            options=options_snapshot,
-            backend=backend,
+        self.distribution_plan_worker = DistributionPlanWorker(
+            input_dir=input_dir,
+            pdf_files=pdf_files,
+            case_root=case_root,
+            config=config,
+            ai_provider=backend,
         )
-        self.distribution_worker.progress.connect(self.handle_distribution_progress)
-        self.distribution_worker.log_ready.connect(self.handle_distribution_log)
-        self.distribution_worker.finished.connect(self.handle_distribution_finished)
-        self.distribution_worker.start()
+        self.distribution_plan_worker.progress.connect(self.handle_distribution_progress)
+        self.distribution_plan_worker.log_ready.connect(self.handle_distribution_log)
+        self.distribution_plan_worker.plan_ready.connect(self.handle_distribution_plan_ready)
+        self.distribution_plan_worker.finished.connect(self.handle_distribution_finished)
+        self.distribution_plan_worker.start()
+
+    def on_apply_distribution_clicked(self):
+        if not self.distribution_plan:
+            show_friendly_error(
+                self,
+                "No plan available",
+                "Run a dry run first to generate a distribution plan.",
+                "No plan found.",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
+
+        input_dir = self.distribution_input_edit.text() or self.input_edit.text()
+        case_root = self.case_root_edit.text()
+        allow_home = self.allow_home_case_root_checkbox.isChecked()
+        ok, reason = validate_distribution_paths(
+            input_dir, case_root, allow_home_case_root=allow_home
+        )
+        if not ok:
+            show_friendly_error(
+                self,
+                "Unsafe distribution paths",
+                "Renamer blocked this distribution apply for safety.",
+                reason,
+                icon=QMessageBox.Icon.Warning,
+            )
+            return
+
+        if (
+            self.distribution_plan_worker
+            and self.distribution_plan_worker.isRunning()
+        ) or (
+            self.distribution_apply_worker
+            and self.distribution_apply_worker.isRunning()
+        ):
+            show_friendly_error(
+                self,
+                "Distribution in progress",
+                "Please wait for the current distribution run to finish.",
+                "Distribution worker already running.",
+                icon=QMessageBox.Icon.Information,
+            )
+            return
+
+        if not self.confirm_batch_summary(
+            "Confirm distribution apply",
+            [f"Input folder: {input_dir}", f"Case root: {case_root}"],
+            dry_run=False,
+            file_count=len(self.distribution_plan),
+        ):
+            self.append_distribution_log_message("[SAFETY] Apply cancelled by user")
+            return
+
+        config = self.build_distribution_config()
+        backend = self.get_ai_backend()
+        audit_log_path = os.path.join(
+            os.path.expanduser("~"), "Renamer", "distribution_audit.log"
+        )
+        self.distribution_audit_log_path = audit_log_path
+        plan_to_apply = self.collect_plan_for_apply()
+        auto_only = self.auto_apply_checkbox.isChecked()
+
+        self.start_distribution_ui(len(plan_to_apply))
+        self.distribution_apply_worker = DistributionApplyWorker(
+            input_dir=input_dir,
+            case_root=case_root,
+            config=config,
+            ai_provider=backend,
+            plan=plan_to_apply,
+            auto_only=auto_only,
+            audit_log_path=audit_log_path,
+        )
+        self.distribution_apply_worker.progress.connect(self.handle_distribution_progress)
+        self.distribution_apply_worker.log_ready.connect(self.handle_distribution_log)
+        self.distribution_apply_worker.finished.connect(self.handle_distribution_finished)
+        self.distribution_apply_worker.start()
 
     def get_ai_backend(self) -> str:
         idx = self.backend_combo.currentIndex()
