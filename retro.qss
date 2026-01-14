@@ -69,6 +69,7 @@ QComboBox {
     background-color: #000000;
     border: 2px solid #006633;
     padding: 5px;
+    color: #00FF66;
     selection-background-color: #00FF66;
     selection-color: #000000;
 }
@@ -88,6 +89,29 @@ QPlainTextEdit {
     border: 2px solid #006633;
     padding: 6px;
     color: #00FF66;
+}
+
+QLineEdit {
+    qproperty-placeholderTextColor: #00AA44;
+}
+
+QComboBox QAbstractItemView,
+QAbstractItemView {
+    background-color: #000000;
+    color: #00FF66;
+    selection-background-color: #00FF66;
+    selection-color: #000000;
+}
+
+QComboBox::item,
+QAbstractItemView::item {
+    color: #00FF66;
+}
+
+QComboBox::item:selected,
+QAbstractItemView::item:selected {
+    background-color: #00FF66;
+    color: #000000;
 }
 
 QPlainTextEdit#StatusLog {
@@ -165,6 +189,26 @@ QCheckBox {
     color: #00FF66;
 }
 
+QLabel:disabled,
+QLineEdit:disabled,
+QComboBox:disabled,
+QPushButton:disabled,
+QCheckBox:disabled,
+QPlainTextEdit:disabled,
+QTextEdit:disabled,
+QSpinBox:disabled {
+    color: #00AA44;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QPlainTextEdit:disabled,
+QTextEdit:disabled,
+QSpinBox:disabled {
+    background-color: #000000;
+    border: 2px solid #00331A;
+}
+
 QCheckBox::indicator {
     width: 14px;
     height: 14px;
@@ -186,6 +230,21 @@ QProgressBar {
 
 QProgressBar::chunk {
     background-color: #00FF66;
+}
+
+/* ---------------- LISTS / ITEM VIEWS ---------------- */
+
+QListWidget,
+QListView {
+    background-color: #000000;
+    border: 2px solid #006633;
+    color: #00FF66;
+}
+
+QListWidget::item:selected,
+QListView::item:selected {
+    background-color: #00FF66;
+    color: #000000;
 }
 
 /* ---------------- STATUS BAR ---------------- */
