@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QLineEdit,
     QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
     QCheckBox, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
+    QListWidget, QListWidgetItem, QTextEdit, QProgressBar, QSizePolicy,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
     QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea
 )
@@ -1060,10 +1060,6 @@ class RenamerGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Renamer")
         self.settings = QSettings("Renamer", "Renamer")
-        self.resize(960, 640)
-        saved_geometry = self.settings.value("window_geometry")
-        if saved_geometry:
-            self.restoreGeometry(saved_geometry)
 
         # State
         self.pdf_files = []
@@ -1708,6 +1704,10 @@ class RenamerGUI(QMainWindow):
         self.distribution_plan_table.setEditTriggers(
             self.distribution_plan_table.EditTrigger.NoEditTriggers
         )
+        self.distribution_plan_table.setMaximumHeight(300)
+        self.distribution_plan_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         plan_layout.addWidget(self.distribution_plan_table)
         plan_group.setLayout(plan_layout)
         self.distribution_layout.addWidget(plan_group)
@@ -1721,7 +1721,10 @@ class RenamerGUI(QMainWindow):
         self.distribution_log_view.setPlaceholderText(
             "Processing details will appear here. Copies are logged to disk as well."
         )
-        self.distribution_log_view.setMinimumHeight(160)
+        self.distribution_log_view.setMaximumHeight(170)
+        self.distribution_log_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         log_layout.addWidget(self.distribution_log_view)
         log_group.setLayout(log_layout)
         self.distribution_layout.addWidget(log_group)
@@ -1747,6 +1750,7 @@ class RenamerGUI(QMainWindow):
 
         self.processing_enabled = False
 
+        self.apply_window_geometry()
         self.load_settings()
         self.ui_ready = True
         self.update_preview()
@@ -1755,6 +1759,24 @@ class RenamerGUI(QMainWindow):
     # ------------------------------------------------------
     # UI helpers
     # ------------------------------------------------------
+
+    def apply_window_geometry(self):
+        default_size = QSize(1320, 720)
+        self.setMinimumWidth(1100)
+        self.setMinimumHeight(650)
+        self.resize(default_size)
+        saved_geometry = self.settings.value("window_geometry")
+        if not saved_geometry:
+            return
+        if not self.restoreGeometry(saved_geometry):
+            self.resize(default_size)
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        available_height = screen.availableGeometry().height()
+        if self.height() > available_height * 0.9:
+            self.resize(default_size)
 
     def on_mode_changed(self, index: int):
         if index < 0 or index >= self.content_stack.count():
