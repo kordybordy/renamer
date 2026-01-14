@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from .scorer import (
     extract_person_pairs_from_parties,
     extract_surnames_from_parties,
     extract_tokens_from_parties,
+    similarity_ratio,
     score_document,
 )
 from .safety import resolve_destination_path, safe_copy
@@ -236,6 +238,7 @@ class DistributionEngine:
 
             candidates = score_summary.candidates
             best = candidates[0] if candidates else None
+            auto_block_reason = ""
             if best:
                 self.log(
                     f"Scored: {len(candidates)} candidates for {filename} "
@@ -263,6 +266,7 @@ class DistributionEngine:
             if candidates:
                 auto, tie = self._decision_for_score(score_summary)
                 force_ask = False
+                auto_block_reason = ""
                 if auto and not tie and best:
                     doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
                     token_overlap = doc_tokens & best.folder.tokens
@@ -300,6 +304,7 @@ class DistributionEngine:
                     else:
                         auto = False
                         force_ask = True
+                        auto_block_reason = "surname-only overlap"
                         if surname_only:
                             reason_detail = (
                                 f"overlap={overlap_count}, non_surname={len(non_surname_overlap)}, "
@@ -321,6 +326,15 @@ class DistributionEngine:
                     confidence = 0.0
                     reason = "Ambiguous match; needs confirmation"
                 else:
+                    if not auto and auto_block_reason:
+                        self.log(
+                            f"Auto-accept blocked: {auto_block_reason} "
+                            f"(score={score_summary.best_score:.1f}, gap={score_summary.best_score - score_summary.second_score:.1f})"
+                        )
+                    if score_summary.best_score < self.config.auto_threshold:
+                        auto_block_reason = "low score"
+                    elif score_summary.best_score - score_summary.second_score < self.config.gap_threshold:
+                        auto_block_reason = "low gap"
                     best_index, ai_confidence, ai_reason = self._ai_tiebreak(doc, candidates)
                     if best_index is not None and ai_confidence >= self.config.ai_threshold:
                         decision = "AI"
@@ -334,6 +348,51 @@ class DistributionEngine:
                         decision = "ASK"
                         confidence = ai_confidence
                         reason = ai_reason or "Ambiguous match; needs confirmation"
+
+            if decision in ("ASK", "UNMATCHED"):
+                doc_token_list = sorted(doc_tokens)
+                doc_pair_list = sorted(doc_pairs)
+                pool_size = score_summary.candidate_pool_size
+                if candidates:
+                    best_candidate = candidates[0]
+                    top_pair_overlap = doc_pairs & best_candidate.folder.person_pairs
+                    top_token_overlap = doc_tokens & best_candidate.folder.tokens
+                    top_similarity = similarity_ratio(
+                        " ".join(doc.opposing_parties), best_candidate.folder.folder_name
+                    )
+                    self.log(
+                        "Match diagnostics: "
+                        f"decision={decision} file={filename} "
+                        f"tokens={doc_token_list} pairs={len(doc_pair_list)} "
+                        f"pool={pool_size} best={best_candidate.folder.folder_name} "
+                        f"score={best_candidate.score:.1f} pair_matches={len(top_pair_overlap)} "
+                        f"token_overlap={len(top_token_overlap)} similarity={top_similarity:.2f} "
+                        f"auto_block={auto_block_reason or 'n/a'}"
+                    )
+                else:
+                    self.log(
+                        "Match diagnostics: "
+                        f"decision={decision} file={filename} "
+                        f"tokens={doc_token_list} pairs={len(doc_pair_list)} "
+                        f"pool={pool_size} best=None score=0.0 "
+                        f"auto_block={auto_block_reason or 'n/a'}"
+                    )
+                logger = logging.getLogger(__name__)
+                if candidates:
+                    top_three = candidates[:3]
+                    for idx, candidate in enumerate(top_three, start=1):
+                        pair_overlap = doc_pairs & candidate.folder.person_pairs
+                        token_overlap = doc_tokens & candidate.folder.tokens
+                        logger.debug(
+                            "Debug match #%d file=%s folder=%s tokens=%s pairs=%s pair_overlap=%s token_overlap=%s",
+                            idx,
+                            filename,
+                            candidate.folder.folder_name,
+                            sorted(candidate.folder.tokens),
+                            sorted(candidate.folder.person_pairs),
+                            sorted(pair_overlap),
+                            sorted(token_overlap),
+                        )
 
             if chosen_folder:
                 try:
