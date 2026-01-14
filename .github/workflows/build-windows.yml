@@ -30,27 +30,25 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          # Pick a known-good poppler-windows release (update if you want)
+      
           $popplerZip = "Release-25.12.0-0.zip"
           $popplerUrl = "https://github.com/oschwartz10612/poppler-windows/releases/download/v25.12.0-0/$popplerZip"
-
+      
           New-Item -ItemType Directory -Force -Path "poppler" | Out-Null
-
-          Invoke-WebRequest -Uri $popplerUrl -OutFile $popplerZip
+      
+          curl.exe -L $popplerUrl -o $popplerZip
           Expand-Archive -Path $popplerZip -DestinationPath "poppler" -Force
-
-          # The zip extracts into poppler\poppler-xx\Library\...
-          $lib = Get-ChildItem -Path "poppler" -Directory | Select-Object -First 1
-          if (-not $lib) { throw "Poppler extract failed" }
-
-          # Normalize to poppler\Library\... (what your app expects)
+      
+          $dir = Get-ChildItem -Path "poppler" -Directory | Select-Object -First 1
+          if (-not $dir) { throw "Poppler extract failed" }
+      
           if (Test-Path "poppler\Library") { Remove-Item "poppler\Library" -Recurse -Force }
-          Move-Item -Path (Join-Path $lib.FullName "Library") -Destination "poppler\Library" -Force
-
+          Move-Item -Path (Join-Path $dir.FullName "Library") -Destination "poppler\Library" -Force
+      
           if (-not (Test-Path "poppler\Library\bin\pdftoppm.exe")) {
             throw "pdftoppm.exe not found after Poppler setup"
           }
+
 
       # ---------- TESSERACT ----------
       - name: Install Tesseract via Chocolatey
@@ -71,10 +69,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "tesseract\tessdata" | Out-Null
-
-          $polUrl = "https://github.com/tesseract-ocr/tessdata/raw/main/pol.traineddata"
-          Invoke-WebRequest -Uri $polUrl -OutFile "tesseract\tessdata\pol.traineddata"
-
+      
+          $polUrl = "https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/pol.traineddata"
+          curl.exe -L $polUrl -o "tesseract\tessdata\pol.traineddata"
+      
           if (-not (Test-Path "tesseract\tessdata\pol.traineddata")) {
             throw "pol.traineddata download failed"
           }
