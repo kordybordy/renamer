@@ -2,12 +2,11 @@ name: Build Windows EXE
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,11 +16,66 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ---------- POPPLER (pdftoppm) ----------
+      - name: Download & prepare Poppler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Pick a known-good poppler-windows release (update if you want)
+          $popplerZip = "Release-25.12.0-0.zip"
+          $popplerUrl = "https://github.com/oschwartz10612/poppler-windows/releases/download/v25.12.0-0/$popplerZip"
+
+          New-Item -ItemType Directory -Force -Path "poppler" | Out-Null
+
+          Invoke-WebRequest -Uri $popplerUrl -OutFile $popplerZip
+          Expand-Archive -Path $popplerZip -DestinationPath "poppler" -Force
+
+          # The zip extracts into poppler\poppler-xx\Library\...
+          $lib = Get-ChildItem -Path "poppler" -Directory | Select-Object -First 1
+          if (-not $lib) { throw "Poppler extract failed" }
+
+          # Normalize to poppler\Library\... (what your app expects)
+          if (Test-Path "poppler\Library") { Remove-Item "poppler\Library" -Recurse -Force }
+          Move-Item -Path (Join-Path $lib.FullName "Library") -Destination "poppler\Library" -Force
+
+          if (-not (Test-Path "poppler\Library\bin\pdftoppm.exe")) {
+            throw "pdftoppm.exe not found after Poppler setup"
+          }
+
+      # ---------- TESSERACT ----------
+      - name: Install Tesseract via Chocolatey
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install tesseract -y
+
+          # Copy into local ./tesseract folder so PyInstaller --add-data works
+          $src = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path $src)) { throw "Tesseract not found at $src" }
+
+          if (Test-Path "tesseract") { Remove-Item "tesseract" -Recurse -Force }
+          Copy-Item -Path $src -Destination "tesseract" -Recurse -Force
+
+      - name: Ensure Polish traineddata present (pol)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "tesseract\tessdata" | Out-Null
+
+          $polUrl = "https://github.com/tesseract-ocr/tessdata/raw/main/pol.traineddata"
+          Invoke-WebRequest -Uri $polUrl -OutFile "tesseract\tessdata\pol.traineddata"
+
+          if (-not (Test-Path "tesseract\tessdata\pol.traineddata")) {
+            throw "pol.traineddata download failed"
+          }
+
+      # ---------- BUILD ----------
       - name: Build (onedir)
         shell: pwsh
         run: |
