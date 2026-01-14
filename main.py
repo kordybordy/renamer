@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
-    QButtonGroup, QPlainTextEdit, QToolButton
+    QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QPixmap, QIcon
@@ -1059,9 +1059,11 @@ class RenamerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Renamer")
-        self.resize(1020, 720)
-
         self.settings = QSettings("Renamer", "Renamer")
+        self.resize(960, 640)
+        saved_geometry = self.settings.value("window_geometry")
+        if saved_geometry:
+            self.restoreGeometry(saved_geometry)
 
         # State
         self.pdf_files = []
@@ -1075,6 +1077,7 @@ class RenamerGUI(QMainWindow):
         self.stop_event = threading.Event()
         self.ui_ready = False
         self.distribution_plan: list[DistributionPlanItem] = []
+        self.distribution_plan_view: list[DistributionPlanItem] = []
         self.distribution_plan_worker: DistributionPlanWorker | None = None
         self.distribution_apply_worker: DistributionApplyWorker | None = None
         self.distribution_audit_log_path: str | None = None
@@ -1566,9 +1569,18 @@ class RenamerGUI(QMainWindow):
         self.settings_layout.addWidget(template_group, 1)
 
         # Distribution page (Page 2)
+        self.distribution_scroll_area = QScrollArea()
+        self.distribution_scroll_area.setWidgetResizable(True)
+        self.distribution_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.distribution_scroll_container = QWidget()
         self.distribution_layout = QVBoxLayout()
         self.distribution_layout.setSpacing(12)
-        self.distribution_page.setLayout(self.distribution_layout)
+        self.distribution_scroll_container.setLayout(self.distribution_layout)
+        self.distribution_scroll_area.setWidget(self.distribution_scroll_container)
+        distribution_page_layout = QVBoxLayout()
+        distribution_page_layout.setContentsMargins(0, 0, 0, 0)
+        distribution_page_layout.addWidget(self.distribution_scroll_area)
+        self.distribution_page.setLayout(distribution_page_layout)
 
         dist_paths_group = QGroupBox("DISTRIBUTION PATHS")
         dist_frame_layout = QVBoxLayout()
@@ -1649,6 +1661,31 @@ class RenamerGUI(QMainWindow):
         plan_layout = QVBoxLayout()
         plan_layout.setSpacing(6)
         plan_layout.setContentsMargins(12, 12, 12, 12)
+        plan_controls = QHBoxLayout()
+        plan_controls.setSpacing(6)
+        plan_controls.addWidget(QLabel("Show:"))
+        self.distribution_filter_combo = QComboBox()
+        self.distribution_filter_combo.addItem("All", "all")
+        self.distribution_filter_combo.addItem("ASK only", "ASK")
+        self.distribution_filter_combo.addItem("AUTO only", "AUTO")
+        self.distribution_filter_combo.addItem("AI only", "AI")
+        self.distribution_filter_combo.addItem("UNMATCHED only", "UNMATCHED")
+        self.distribution_filter_combo.currentIndexChanged.connect(
+            self.on_distribution_filter_changed
+        )
+        plan_controls.addWidget(self.distribution_filter_combo)
+        plan_controls.addSpacing(12)
+        plan_controls.addWidget(QLabel("Sort:"))
+        self.distribution_sort_combo = QComboBox()
+        self.distribution_sort_combo.addItem("Decision (ASK first)", "decision")
+        self.distribution_sort_combo.addItem("Confidence (low→high)", "confidence_asc")
+        self.distribution_sort_combo.addItem("Confidence (high→low)", "confidence_desc")
+        self.distribution_sort_combo.currentIndexChanged.connect(
+            self.on_distribution_sort_changed
+        )
+        plan_controls.addWidget(self.distribution_sort_combo)
+        plan_controls.addStretch()
+        plan_layout.addLayout(plan_controls)
         self.distribution_plan_table = QTableWidget(0, 5)
         self.distribution_plan_table.setHorizontalHeaderLabels(
             ["PDF", "Decision", "Chosen folder", "Confidence", "Select folder (ASK)"]
@@ -1658,6 +1695,15 @@ class RenamerGUI(QMainWindow):
         )
         self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
         )
         self.distribution_plan_table.setEditTriggers(
             self.distribution_plan_table.EditTrigger.NoEditTriggers
@@ -1817,6 +1863,7 @@ class RenamerGUI(QMainWindow):
 
     def closeEvent(self, event):
         self.save_settings()
+        self.settings.setValue("window_geometry", self.saveGeometry())
         super().closeEvent(event)
 
     def log_activity(self, message: str):
@@ -1992,7 +2039,9 @@ class RenamerGUI(QMainWindow):
 
     def handle_distribution_plan_ready(self, plan: list[DistributionPlanItem]):
         self.distribution_plan = plan
-        self.update_distribution_plan_table(plan)
+        sorted_plan = self.get_sorted_plan(plan, self.distribution_sort_combo.currentData())
+        self.update_distribution_plan_table(sorted_plan)
+        self.apply_distribution_filter()
         self.apply_distribution_button.setEnabled(bool(plan))
         if plan:
             self.append_distribution_log_message(
@@ -2133,6 +2182,56 @@ class RenamerGUI(QMainWindow):
     # Distribution helpers
     # ------------------------------------------------------
 
+    def get_sorted_plan(
+        self, plan: list[DistributionPlanItem], sort_mode: str
+    ) -> list[DistributionPlanItem]:
+        if not plan:
+            return []
+        if sort_mode == "confidence_asc":
+            return sorted(plan, key=lambda item: item.confidence)
+        if sort_mode == "confidence_desc":
+            return sorted(plan, key=lambda item: item.confidence, reverse=True)
+        if sort_mode == "decision":
+            priority = {
+                "ASK": 0,
+                "AI": 1,
+                "AUTO": 2,
+                "UNMATCHED": 3,
+                "SKIP": 3,
+            }
+            return sorted(
+                plan,
+                key=lambda item: (priority.get(item.decision, 99), -item.confidence),
+            )
+        return plan[:]
+
+    def apply_distribution_filter(self):
+        if not hasattr(self, "distribution_plan_table"):
+            return
+        if self.distribution_plan_table.rowCount() == 0:
+            return
+        filter_mode = self.distribution_filter_combo.currentData()
+        for row in range(self.distribution_plan_table.rowCount()):
+            decision_item = self.distribution_plan_table.item(row, 1)
+            decision = decision_item.text() if decision_item else ""
+            if filter_mode == "UNMATCHED":
+                matches = decision in ("UNMATCHED", "SKIP")
+            else:
+                matches = filter_mode in ("all", decision)
+            self.distribution_plan_table.setRowHidden(row, not matches)
+
+    def on_distribution_filter_changed(self):
+        self.apply_distribution_filter()
+
+    def on_distribution_sort_changed(self):
+        if not self.distribution_plan:
+            return
+        sorted_plan = self.get_sorted_plan(
+            self.distribution_plan, self.distribution_sort_combo.currentData()
+        )
+        self.update_distribution_plan_table(sorted_plan)
+        self.apply_distribution_filter()
+
     def build_distribution_config(self) -> DistributionConfig:
         raw_stopwords = self.distribution_stopwords_edit.text()
         stopwords = [word.strip() for word in raw_stopwords.split(",") if word.strip()]
@@ -2148,6 +2247,7 @@ class RenamerGUI(QMainWindow):
         )
 
     def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):
+        self.distribution_plan_view = plan[:]
         self.distribution_plan_table.setRowCount(0)
         self.distribution_plan_table.setRowCount(len(plan))
         for row, item in enumerate(plan):
@@ -2183,7 +2283,8 @@ class RenamerGUI(QMainWindow):
 
     def collect_plan_for_apply(self) -> list[DistributionPlanItem]:
         updated_plan: list[DistributionPlanItem] = []
-        for row, item in enumerate(self.distribution_plan):
+        plan = self.distribution_plan_view or self.distribution_plan
+        for row, item in enumerate(plan):
             chooser = self.distribution_plan_table.cellWidget(row, 4)
             selected_path = ""
             if isinstance(chooser, QComboBox):
@@ -2293,6 +2394,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_plan_table.setRowCount(0)
         self.apply_distribution_button.setEnabled(False)
         self.distribution_plan = []
+        self.distribution_plan_view = []
         config = self.build_distribution_config()
         backend = self.get_ai_backend()
         self.start_distribution_ui(len(pdf_files))
