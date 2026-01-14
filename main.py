@@ -1446,7 +1446,8 @@ class RenamerGUI(QMainWindow):
         auto_threshold_col.addWidget(QLabel("Auto threshold (score):"))
         self.distribution_auto_threshold_spin = QSpinBox()
         self.distribution_auto_threshold_spin.setRange(0, 200)
-        self.distribution_auto_threshold_spin.setValue(70)
+        # Conservative defaults: favor surname+given-name alignment while keeping auto-accept cautious.
+        self.distribution_auto_threshold_spin.setValue(60)
         auto_threshold_col.addWidget(self.distribution_auto_threshold_spin)
         distribution_layout.addLayout(auto_threshold_col)
 
@@ -1455,7 +1456,7 @@ class RenamerGUI(QMainWindow):
         gap_threshold_col.addWidget(QLabel("Gap threshold (score):"))
         self.distribution_gap_threshold_spin = QSpinBox()
         self.distribution_gap_threshold_spin.setRange(0, 200)
-        self.distribution_gap_threshold_spin.setValue(15)
+        self.distribution_gap_threshold_spin.setValue(12)
         gap_threshold_col.addWidget(self.distribution_gap_threshold_spin)
         distribution_layout.addLayout(gap_threshold_col)
 
@@ -1738,8 +1739,8 @@ class RenamerGUI(QMainWindow):
         defendant_order_bool = str(defendant_order).lower() == "true"
         self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
         self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
-        auto_threshold = self.settings.value("distribution_auto_threshold", 70)
-        gap_threshold = self.settings.value("distribution_gap_threshold", 15)
+        auto_threshold = self.settings.value("distribution_auto_threshold", 60)
+        gap_threshold = self.settings.value("distribution_gap_threshold", 12)
         ai_threshold = self.settings.value("distribution_ai_threshold", 0.7)
         top_k = self.settings.value("distribution_top_k", 15)
         unmatched_policy = self.settings.value("distribution_unmatched_policy", "leave")
