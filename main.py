@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QSettings
-from PyQt6.QtGui import QPixmap, QIcon
+from PyQt6.QtGui import QPixmap, QIcon, QPalette, QColor
 
 from distribution.engine import DistributionConfig, DistributionEngine
 from distribution.models import DistributionPlanItem
@@ -3089,6 +3089,15 @@ if __name__ == "__main__":
     app.setApplicationName("Renamer")
     app.setApplicationDisplayName("Renamer")
     app.setStyleSheet(load_stylesheet())
+    retro_palette = app.palette()
+    retro_palette.setColor(QPalette.ColorRole.Window, QColor("#000000"))
+    retro_palette.setColor(QPalette.ColorRole.Base, QColor("#000000"))
+    retro_palette.setColor(QPalette.ColorRole.Text, QColor("#00FF66"))
+    retro_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#00FF66"))
+    retro_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#00AA44"))
+    retro_palette.setColor(QPalette.ColorRole.Highlight, QColor("#00FF66"))
+    retro_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+    app.setPalette(retro_palette)
 
     logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
