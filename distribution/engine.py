@@ -11,6 +11,7 @@ from .ai_tiebreaker import choose_best_candidate
 from .indexer import build_folder_index
 from .models import DocumentMeta, DistributionPlanItem, MatchCandidate
 from .scorer import (
+    COMMON_FIRST_NAMES,
     DEFAULT_STOPWORDS,
     ScoreSummary,
     extract_surnames_from_parties,
@@ -59,6 +60,16 @@ class DistributionEngine:
 
     def build_index(self) -> list:
         return build_folder_index(self.case_root, self.config.normalized_stopwords())
+
+    def _is_multi_defendant_folder(self, folder: MatchCandidate | None) -> bool:
+        if not folder:
+            return False
+        folder_meta = folder.folder
+        if "_" not in folder_meta.folder_name:
+            return False
+        if len(folder_meta.surnames) < 2:
+            return False
+        return not any(token in COMMON_FIRST_NAMES for token in folder_meta.tokens)
 
     def _load_sidecar_meta(self, pdf_path: str) -> dict:
         base = os.path.splitext(pdf_path)[0]
@@ -240,6 +251,7 @@ class DistributionEngine:
 
             if candidates:
                 auto, tie = self._decision_for_score(score_summary)
+                force_ask = False
                 if auto and not tie and best:
                     stopwords = self.config.normalized_stopwords()
                     doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
@@ -247,17 +259,55 @@ class DistributionEngine:
                     token_overlap = doc_tokens & best.folder.tokens
                     surname_overlap = doc_surnames & best.folder.surnames
                     non_surname_overlap = token_overlap - surname_overlap
-                    if not non_surname_overlap:
-                        auto = False
+                    overlap_count = len(token_overlap)
+                    full_name_match = overlap_count >= 2 and bool(non_surname_overlap)
+                    surname_only = bool(token_overlap) and (
+                        overlap_count == 1 or token_overlap <= surname_overlap
+                    )
+                    score_gap = score_summary.best_score - score_summary.second_score
+                    multi_defendant_folder = self._is_multi_defendant_folder(best)
+                    allow_surname_exception = (
+                        surname_only
+                        and not multi_defendant_folder
+                        and best.score >= 90.0
+                        and score_gap >= 20.0
+                    )
+
+                    if full_name_match:
                         self.log(
-                            "Auto-accept blocked: surname-only overlap for "
-                            f"{filename} -> {best.folder.folder_name}"
+                            "Auto-accepted: full-name overlap for "
+                            f"{filename} -> {best.folder.folder_name} "
+                            f"(score={best.score:.1f}, overlap={overlap_count}, gap={score_gap:.1f})"
                         )
+                    elif allow_surname_exception:
+                        self.log(
+                            "Auto-accepted: surname-only exception for "
+                            f"{filename} -> {best.folder.folder_name} "
+                            f"(score={best.score:.1f}, overlap={overlap_count}, gap={score_gap:.1f})"
+                        )
+                    else:
+                        auto = False
+                        force_ask = True
+                        if surname_only:
+                            reason_detail = (
+                                f"overlap={overlap_count}, non_surname={len(non_surname_overlap)}, "
+                                f"multi_defendant={multi_defendant_folder}"
+                            )
+                            self.log(
+                                "Auto-accept blocked: surname-only overlap for "
+                                f"{filename} -> {best.folder.folder_name} "
+                                f"(score={best.score:.1f}, overlap={overlap_count}, reason={reason_detail})"
+                            )
+
                 if auto and not tie:
                     decision = "AUTO"
                     confidence = min(1.0, best.score / 100.0)
                     reason = "High confidence deterministic match"
                     chosen_folder = best.folder.folder_path
+                elif force_ask:
+                    decision = "ASK"
+                    confidence = 0.0
+                    reason = "Ambiguous match; needs confirmation"
                 else:
                     best_index, ai_confidence, ai_reason = self._ai_tiebreak(doc, candidates)
                     if best_index is not None and ai_confidence >= self.config.ai_threshold:
