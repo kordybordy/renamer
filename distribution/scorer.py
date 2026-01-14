@@ -27,41 +27,51 @@ DEFAULT_STOPWORDS = [
 ]
 
 COMMON_FIRST_NAMES_RAW = {
-    "Adam",
-    "Adrian",
-    "Agnieszka",
-    "Alicja",
-    "Anna",
-    "Barbara",
-    "Bartosz",
-    "Beata",
-    "Dariusz",
-    "Grzegorz",
     "Jan",
-    "Joanna",
-    "Kamil",
-    "Karolina",
+    "Anna",
+    "Piotr",
     "Katarzyna",
-    "Krzysztof",
-    "Lukasz",
-    "Łukasz",
-    "Magdalena",
-    "Marcin",
-    "Marek",
-    "Maria",
-    "Mateusz",
-    "Michal",
-    "Michał",
-    "Monika",
     "Pawel",
     "Paweł",
-    "Piotr",
-    "Robert",
+    "Agnieszka",
     "Tomasz",
-    "Wojciech",
-    "Zbigniew",
-    "Stanislaw",
-    "Stanisław",
+    "Magdalena",
+    "Marek",
+    "Joanna",
+    "Krzysztof",
+    "Barbara",
+    "Andrzej",
+    "Monika",
+    "Michal",
+    "Michał",
+    "Ewa",
+    "Marcin",
+    "Zofia",
+    "Adam",
+    "Aleksandra",
+    "Karol",
+    "Natalia",
+    "Jakub",
+    "Iwona",
+    "Rafal",
+    "Rafał",
+    "Julia",
+    "Dariusz",
+    "Oliwia",
+    "Patryk",
+    "Weronika",
+    "Damian",
+    "Elzbieta",
+    "Elżbieta",
+    "Grzegorz",
+    "Marta",
+    "Mateusz",
+    "Dorota",
+    "Sebastian",
+    "Kinga",
+    "Lukasz",
+    "Łukasz",
+    "Beata",
 }
 
 
@@ -206,11 +216,11 @@ def score_document_to_folder(
     token_overlap = doc_tokens & folder.tokens
     non_surname_overlap = token_overlap - surname_overlap
     if token_overlap:
-        score += 5.0 * len(token_overlap)
+        score += 4.0 * len(token_overlap)
         reasons.append(f"Token overlap: {', '.join(sorted(token_overlap))}")
     if surname_overlap and non_surname_overlap:
         # Ensure surname+given-name beats surname-only matches without inflating scale.
-        score += 15.0
+        score += 20.0
         reasons.append("Bonus: surname and given name overlap")
 
     ratio = similarity_ratio(" ".join(doc.opposing_parties), folder.folder_name)
@@ -228,7 +238,7 @@ def score_document_to_folder(
 
     logger.debug(
         "Score doc=%s folder=%s doc_surnames=%s folder_surnames=%s doc_tokens=%s folder_tokens=%s "
-        "overlap=%d score=%.1f",
+        "token_overlap=%d non_surname_overlap=%d score=%.1f",
         doc.file_name,
         folder.folder_name,
         sorted(doc_surnames),
@@ -236,6 +246,7 @@ def score_document_to_folder(
         sorted(doc_tokens),
         sorted(folder.tokens),
         len(token_overlap),
+        len(non_surname_overlap),
         score,
     )
 

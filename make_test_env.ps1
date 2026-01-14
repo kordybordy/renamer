@@ -52,6 +52,16 @@ $NamesPL = @(
 
 function Get-Rand($arr) { $arr | Get-Random }
 
+# Map ASCII tokens to Polish tokens for PDF naming
+$SurnameMap = @{}
+for ($i = 0; $i -lt $SurnamesASCII.Count; $i++) {
+  $SurnameMap[$SurnamesASCII[$i].ToUpper()] = $SurnamesPL[$i]
+}
+$NameMap = @{}
+for ($i = 0; $i -lt $NamesASCII.Count; $i++) {
+  $NameMap[$NamesASCII[$i].ToUpper()] = $NamesPL[$i]
+}
+
 # Helper: generate folder-safe name part (already ASCII for folder pools)
 function To-FolderToken([string]$s) {
   # Ensure only A-Z0-9_ (keep it simple and Windows-safe)
@@ -62,6 +72,7 @@ function To-FolderToken([string]$s) {
 
 # Create 30 folders: SURNAME_NAME (some multi-defendant: SURNAME_SURNAME)
 $folders = New-Object System.Collections.Generic.List[string]
+$folderSpecs = New-Object System.Collections.Generic.List[object]
 
 for ($i=0; $i -lt 30; $i++) {
   $s1 = To-FolderToken (Get-Rand $SurnamesASCII)
@@ -72,10 +83,23 @@ for ($i=0; $i -lt 30; $i++) {
   if ($multi) {
     $s2 = To-FolderToken (Get-Rand $SurnamesASCII)
     while ($s2 -eq $s1) { $s2 = To-FolderToken (Get-Rand $SurnamesASCII) }
+    $given = To-FolderToken (Get-Rand $NamesASCII)
     $folderName = "${s1}_${s2}"
+    $folderSpecs.Add([pscustomobject]@{
+      Folder = $folderName
+      FolderType = "multi"
+      Surnames = @($s1, $s2)
+      GivenName = $given
+    }) | Out-Null
   } else {
     $n1 = To-FolderToken (Get-Rand $NamesASCII)
     $folderName = "${s1}_${n1}"
+    $folderSpecs.Add([pscustomobject]@{
+      Folder = $folderName
+      FolderType = "surname_name"
+      Surnames = @($s1)
+      GivenName = $n1
+    }) | Out-Null
   }
 
   $full = Join-Path $CasesDir $folderName
@@ -92,14 +116,28 @@ for ($i=0; $i -lt 30; $i++) {
   $full = Join-Path $CasesDir $folderName
   New-Item -ItemType Directory -Force -Path $full | Out-Null
   $folders.Add($folderName) | Out-Null
+  $folderSpecs.Add([pscustomobject]@{
+    Folder = $folderName
+    FolderType = "name_surname"
+    Surnames = @($s)
+    GivenName = $n
+  }) | Out-Null
 }
 
 # Create 60 PDFs in input folder named with Polish letters: "Surname Name - Pozew.pdf"
 # (Use unique pairs; if collision, append (n))
 $used = @{}
-for ($i=0; $i -lt 60; $i++) {
-  $surname = Get-Rand $SurnamesPL
-  $name    = Get-Rand $NamesPL
+$specs = $folderSpecs | Select-Object -First 60
+foreach ($spec in $specs) {
+  if ($spec.FolderType -eq "multi") {
+    $surnameToken = Get-Rand $spec.Surnames
+    $givenToken = $spec.GivenName
+  } else {
+    $surnameToken = $spec.Surnames[0]
+    $givenToken = $spec.GivenName
+  }
+  $surname = $SurnameMap[$surnameToken]
+  $name = $NameMap[$givenToken]
   $base    = "$surname $name - Pozew"
   $file    = "$base.pdf"
 
