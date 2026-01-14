@@ -10,7 +10,13 @@ from typing import Callable
 from .ai_tiebreaker import choose_best_candidate
 from .indexer import build_folder_index
 from .models import DocumentMeta, DistributionPlanItem, MatchCandidate
-from .scorer import DEFAULT_STOPWORDS, ScoreSummary, extract_surnames_from_parties, score_document
+from .scorer import (
+    DEFAULT_STOPWORDS,
+    ScoreSummary,
+    extract_surnames_from_parties,
+    score_document,
+    tokenize,
+)
 from .safety import resolve_destination_path, safe_copy
 
 
@@ -234,6 +240,19 @@ class DistributionEngine:
 
             if candidates:
                 auto, tie = self._decision_for_score(score_summary)
+                if auto and not tie and best:
+                    stopwords = self.config.normalized_stopwords()
+                    doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
+                    doc_tokens = set(tokenize(" ".join(doc.opposing_parties), stopwords))
+                    token_overlap = doc_tokens & best.folder.tokens
+                    surname_overlap = doc_surnames & best.folder.surnames
+                    non_surname_overlap = token_overlap - surname_overlap
+                    extreme_score = 95.0
+                    if not non_surname_overlap and best.score < extreme_score:
+                        auto = False
+                        self.log(
+                            "Auto-accept blocked: passes threshold but lacks given-name overlap"
+                        )
                 if auto and not tie:
                     decision = "AUTO"
                     confidence = min(1.0, best.score / 100.0)

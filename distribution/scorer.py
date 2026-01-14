@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -25,6 +26,47 @@ DEFAULT_STOPWORDS = [
     "international",
 ]
 
+COMMON_FIRST_NAMES_RAW = {
+    "Adam",
+    "Adrian",
+    "Agnieszka",
+    "Alicja",
+    "Anna",
+    "Barbara",
+    "Bartosz",
+    "Beata",
+    "Dariusz",
+    "Grzegorz",
+    "Jan",
+    "Joanna",
+    "Kamil",
+    "Karolina",
+    "Katarzyna",
+    "Krzysztof",
+    "Lukasz",
+    "Łukasz",
+    "Magdalena",
+    "Marcin",
+    "Marek",
+    "Maria",
+    "Mateusz",
+    "Michal",
+    "Michał",
+    "Monika",
+    "Pawel",
+    "Paweł",
+    "Piotr",
+    "Robert",
+    "Tomasz",
+    "Wojciech",
+    "Zbigniew",
+    "Stanislaw",
+    "Stanisław",
+}
+
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ScoreSummary:
@@ -44,6 +86,9 @@ def normalize_text(text: str) -> str:
     cleaned = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+COMMON_FIRST_NAMES = {normalize_text(name) for name in COMMON_FIRST_NAMES_RAW if name}
 
 
 def normalize_stopwords(stopwords: Iterable[str]) -> set[str]:
@@ -73,6 +118,25 @@ def last_non_stopword(tokens: list[str], stopwords: set[str]) -> str:
     return ""
 
 
+def choose_surname(tokens: list[str], stopwords: set[str]) -> str:
+    filtered = [token for token in tokens if token and token not in stopwords]
+    if not filtered:
+        return ""
+    if len(filtered) == 2:
+        first, second = filtered
+        first_is_name = first in COMMON_FIRST_NAMES
+        second_is_name = second in COMMON_FIRST_NAMES
+        if first_is_name and not second_is_name:
+            return second
+        if second_is_name and not first_is_name:
+            return first
+        return second
+    for token in reversed(filtered):
+        if token not in COMMON_FIRST_NAMES:
+            return token
+    return filtered[-1]
+
+
 def extract_surnames_from_parties(parties: Iterable[str], stopwords: Iterable[str]) -> set[str]:
     blocked = normalize_stopwords(stopwords)
     surnames: set[str] = set()
@@ -82,7 +146,7 @@ def extract_surnames_from_parties(parties: Iterable[str], stopwords: Iterable[st
             segments = [name]
         for segment in segments:
             tokens = [tok for tok in normalize_text(segment).split() if tok]
-            surname = last_non_stopword(tokens, blocked)
+            surname = choose_surname(tokens, blocked)
             if surname:
                 surnames.add(surname)
     return surnames
@@ -96,9 +160,17 @@ def extract_surnames_from_folder(folder_name: str, stopwords: Iterable[str]) -> 
         segments = [folder_name]
     for segment in segments:
         tokens = [tok for tok in normalize_text(segment).split() if tok]
-        surname = last_non_stopword(tokens, blocked)
-        if surname:
-            surnames.add(surname)
+        candidates = [
+            token
+            for token in tokens
+            if token and token not in blocked and token not in COMMON_FIRST_NAMES
+        ]
+        if candidates:
+            surnames.update(candidates)
+        else:
+            fallback = last_non_stopword(tokens, blocked)
+            if fallback:
+                surnames.add(fallback)
     return surnames
 
 
@@ -132,9 +204,14 @@ def score_document_to_folder(
 
     doc_tokens = set(tokenize(" ".join(doc.opposing_parties), stopwords))
     token_overlap = doc_tokens & folder.tokens
+    non_surname_overlap = token_overlap - surname_overlap
     if token_overlap:
         score += 5.0 * len(token_overlap)
         reasons.append(f"Token overlap: {', '.join(sorted(token_overlap))}")
+    if surname_overlap and non_surname_overlap:
+        # Ensure surname+given-name beats surname-only matches without inflating scale.
+        score += 15.0
+        reasons.append("Bonus: surname and given name overlap")
 
     ratio = similarity_ratio(" ".join(doc.opposing_parties), folder.folder_name)
     if ratio:
@@ -148,6 +225,19 @@ def score_document_to_folder(
     if len(doc_surnames) >= 2 and not token_overlap:
         score -= 5.0
         reasons.append("Penalty: no meaningful token overlap for multi-party doc")
+
+    logger.debug(
+        "Score doc=%s folder=%s doc_surnames=%s folder_surnames=%s doc_tokens=%s folder_tokens=%s "
+        "overlap=%d score=%.1f",
+        doc.file_name,
+        folder.folder_name,
+        sorted(doc_surnames),
+        sorted(folder.surnames),
+        sorted(doc_tokens),
+        sorted(folder.tokens),
+        len(token_overlap),
+        score,
+    )
 
     return MatchCandidate(folder=folder, score=score, reasons=reasons)
 
