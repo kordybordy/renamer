@@ -83,6 +83,7 @@ class ScoreSummary:
     candidates: list[MatchCandidate]
     best_score: float
     second_score: float
+    candidate_pool_size: int
 
 
 def strip_diacritics(text: str) -> str:
@@ -93,6 +94,7 @@ def strip_diacritics(text: str) -> str:
 def normalize_text(text: str) -> str:
     cleaned = strip_diacritics(text or "")
     cleaned = cleaned.lower()
+    cleaned = re.sub(r"[‐‑–—−]", "-", cleaned)
     cleaned = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
@@ -121,6 +123,13 @@ def split_parties(text: str) -> list[str]:
     for part in parts:
         segments.extend(_split_party_segment(part))
     return segments
+
+
+def _split_parties_simple(text: str) -> list[str]:
+    raw = text or ""
+    raw = raw.replace("&", ",")
+    raw = re.sub(r"\s+(?:i|oraz)\s+", ",", raw, flags=re.IGNORECASE)
+    return [part.strip() for part in re.split(r"[;,]", raw) if part.strip()]
 
 
 def _split_party_segment(segment: str) -> list[str]:
@@ -161,36 +170,17 @@ def extract_tokens(text: str, stopwords: Iterable[str]) -> set[str]:
     return extract_tokens_from_parties([text], stopwords)
 
 
-def _unique_tokens(tokens: list[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for token in tokens:
-        if token in seen:
-            continue
-        seen.add(token)
-        ordered.append(token)
-    return ordered
-
-
-def _pick_person_pair(tokens: list[str]) -> tuple[str, str] | None:
-    tokens = _unique_tokens(tokens)
+def _extract_adjacent_pairs(tokens: list[str]) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
     if len(tokens) < 2:
-        return None
-    if len(tokens) == 2:
-        return tuple(sorted(tokens))
-    first_name_tokens = [token for token in tokens if token in COMMON_FIRST_NAMES]
-    if first_name_tokens:
-        given = max(first_name_tokens, key=len)
-        others = [token for token in tokens if token != given]
-        if not others:
-            return None
-        surname = max(others, key=len)
-        return tuple(sorted([given, surname]))
-    shortest = min(tokens, key=len)
-    longest = max(tokens, key=len)
-    if shortest == longest:
-        return tuple(sorted(tokens)[:2])
-    return tuple(sorted([shortest, longest]))
+        return pairs
+    for idx in range(len(tokens) - 1):
+        left = tokens[idx]
+        right = tokens[idx + 1]
+        if not left or not right:
+            continue
+        pairs.add(tuple(sorted((left, right))))
+    return pairs
 
 
 def extract_person_pairs(text: str, stopwords: Iterable[str]) -> set[tuple[str, str]]:
@@ -203,7 +193,7 @@ def extract_person_pairs_from_parties(
     blocked = normalize_stopwords(stopwords)
     pairs: set[tuple[str, str]] = set()
     for name in parties:
-        segments = split_parties(name)
+        segments = _split_parties_simple(name)
         if not segments:
             segments = [name]
         for segment in segments:
@@ -212,9 +202,7 @@ def extract_person_pairs_from_parties(
                 for tok in normalize_text(segment).split()
                 if tok and tok not in blocked
             ]
-            pair = _pick_person_pair(tokens)
-            if pair:
-                pairs.add(pair)
+            pairs.update(_extract_adjacent_pairs(tokens))
     return pairs
 
 
@@ -290,7 +278,10 @@ def score_document_to_folder(
     token_overlap = doc_tokens & folder.tokens
     non_surname_overlap = token_overlap - surname_overlap
     if token_overlap:
-        score += 4.0 * len(token_overlap)
+        token_score = 4.0 * len(token_overlap)
+        if not pair_overlap:
+            token_score = min(token_score, 10.0)
+        score += token_score
         reasons.append(f"Token overlap: {', '.join(sorted(token_overlap))}")
     if surname_overlap and non_surname_overlap:
         score += 10.0
@@ -298,7 +289,8 @@ def score_document_to_folder(
 
     ratio = similarity_ratio(" ".join(doc.opposing_parties), folder.folder_name)
     if ratio:
-        score += ratio * 20.0
+        ratio_weight = 20.0 if pair_overlap else 10.0
+        score += ratio * ratio_weight
         reasons.append(f"Name similarity: {ratio:.2f}")
 
     mismatch_tokens = _mismatched_surname_tokens(doc_person_pairs, folder.person_pairs)
@@ -315,6 +307,17 @@ def score_document_to_folder(
     if len(doc_surnames) >= 2 and not token_overlap:
         score -= 5.0
         reasons.append("Penalty: no meaningful token overlap for multi-party doc")
+
+    common_given_overlap = token_overlap & COMMON_FIRST_NAMES
+    if common_given_overlap and not pair_overlap and not surname_overlap:
+        score -= 25.0 * len(common_given_overlap)
+        reasons.append(
+            f"Penalty: common given-name-only overlap ({', '.join(sorted(common_given_overlap))})"
+        )
+
+    if not pair_overlap and len(token_overlap) == 1 and len(doc_tokens) >= 2:
+        score -= 12.0
+        reasons.append("Penalty: single-token overlap without pair match")
 
     logger.debug(
         "Score doc=%s folder=%s doc_surnames=%s folder_surnames=%s doc_tokens=%s folder_tokens=%s "
@@ -350,6 +353,8 @@ def _mismatched_surname_tokens(
     for token in sorted(set(doc_map) & set(folder_map)):
         if token in COMMON_FIRST_NAMES:
             continue
+        if len(token) <= 2:
+            continue
         doc_others = doc_map[token]
         folder_others = folder_map[token]
         if doc_others and folder_others and not (doc_others & folder_others):
@@ -363,9 +368,43 @@ def score_document(
     stopwords: Iterable[str],
     top_k: int,
 ) -> ScoreSummary:
-    candidates = [score_document_to_folder(doc, folder, stopwords) for folder in folders]
+    candidate_pool, pool_size = _select_candidate_pool(doc, folders, stopwords, max_pool=300)
+    candidates = [
+        score_document_to_folder(doc, folder, stopwords) for folder in candidate_pool
+    ]
     candidates.sort(key=lambda cand: (cand.score, cand.folder.folder_name.lower()), reverse=True)
     top_candidates = candidates[: max(1, top_k)]
     best_score = top_candidates[0].score if top_candidates else 0.0
     second_score = top_candidates[1].score if len(top_candidates) > 1 else 0.0
-    return ScoreSummary(candidates=top_candidates, best_score=best_score, second_score=second_score)
+    return ScoreSummary(
+        candidates=top_candidates,
+        best_score=best_score,
+        second_score=second_score,
+        candidate_pool_size=pool_size,
+    )
+
+
+def _select_candidate_pool(
+    doc: DocumentMeta,
+    folders: Iterable[FolderMeta],
+    stopwords: Iterable[str],
+    max_pool: int,
+) -> tuple[list[FolderMeta], int]:
+    folder_list = list(folders)
+    doc_tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
+    doc_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
+    if not doc_tokens and not doc_pairs:
+        return folder_list, len(folder_list)
+    scored: list[tuple[int, FolderMeta]] = []
+    for folder in folder_list:
+        token_overlap = doc_tokens & folder.tokens
+        pair_overlap = doc_pairs & folder.person_pairs
+        if not token_overlap and not pair_overlap:
+            continue
+        overlap_score = len(token_overlap) + (2 * len(pair_overlap))
+        scored.append((overlap_score, folder))
+    if not scored:
+        return folder_list, len(folder_list)
+    scored.sort(key=lambda item: (item[0], item[1].folder_name.lower()), reverse=True)
+    pool = [folder for _, folder in scored[:max_pool]]
+    return pool, len(pool)

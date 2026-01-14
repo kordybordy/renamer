@@ -54,9 +54,17 @@ def test_surname_name_order_independent() -> None:
     assert summary.candidates[0].folder.folder_name == correct.folder_name
 
 
+def test_name_surname_order_flip_matches() -> None:
+    doc = make_doc(["Grażyna Żmijewska"], "Grażyna Żmijewska - Pozew.pdf")
+    correct = make_folder("ZMIJEWSKA_GRAZYNA")
+    wrong = make_folder("ZMIJEWSKA_ANNA")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
 def test_hyphenated_surname_matches() -> None:
     doc = make_doc(["Zwolińska-Gawlak Wanda"], "Zwolińska-Gawlak Wanda - Pozew.pdf")
-    correct = make_folder("ZWOLIŃSKA - GAWLAK_WANDA")
+    correct = make_folder("ZWOLINSKA - GAWLAK_WANDA")
     wrong = make_folder("ZWOLIŃSKA - GAWLAK_ANNA")
     summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
     assert summary.candidates[0].folder.folder_name == correct.folder_name
@@ -69,5 +77,32 @@ def test_multi_party_prefers_more_people() -> None:
     )
     correct = make_folder("ZMITROWICZ_KAMIL_ZMITROWICZ_TAMARA")
     wrong = make_folder("ZMITROWICZ_KAMIL")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_diacritics_fold_matches_ascii_folder() -> None:
+    doc = make_doc(["Żmijewska Grażyna"], "Żmijewska Grażyna - Pozew.pdf")
+    correct = make_folder("ZMIJEWSKA_GRAZYNA")
+    wrong = make_folder("KOWALSKA_GRAZYNA")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_multi_party_family_matches_by_pairs() -> None:
+    doc = make_doc(
+        ["Dziewulska Zofia, Dziewulski Paweł"],
+        "Dziewulska Zofia, Dziewulski Paweł - Pozew.pdf",
+    )
+    correct = make_folder("DZIEWULSKA_ZOFIA_DZIEWULSKI_PAWEL")
+    wrong = make_folder("DZIEWULSKA_ZOFIA")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_given_name_only_trap_is_penalized() -> None:
+    doc = make_doc(["Żmijewska Grażyna"], "Żmijewska Grażyna - Pozew.pdf")
+    correct = make_folder("ZMIJEWSKA_GRAZYNA")
+    wrong = make_folder("GRAZYNA_KOWALSKA")
     summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
     assert summary.candidates[0].folder.folder_name == correct.folder_name
