@@ -24,6 +24,7 @@ class FolderMeta:
     normalized_name: str
     tokens: set[str] = field(default_factory=set)
     surnames: set[str] = field(default_factory=set)
+    person_pairs: set[tuple[str, str]] = field(default_factory=set)
     case_numbers: set[str] = field(default_factory=set)
 
 

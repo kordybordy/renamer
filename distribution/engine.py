@@ -14,9 +14,10 @@ from .scorer import (
     COMMON_FIRST_NAMES,
     DEFAULT_STOPWORDS,
     ScoreSummary,
+    extract_person_pairs_from_parties,
     extract_surnames_from_parties,
+    extract_tokens_from_parties,
     score_document,
-    tokenize,
 )
 from .safety import resolve_destination_path, safe_copy
 
@@ -242,6 +243,16 @@ class DistributionEngine:
                 )
             else:
                 self.log(f"Scored: 0 candidates for {filename}")
+                if not folder_index:
+                    self.log("No candidates: folder index contained 0 folders")
+
+            stopwords = self.config.normalized_stopwords()
+            doc_tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
+            doc_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
+            if not doc_tokens and not doc_pairs:
+                self.log("No candidates: document party parsing returned empty")
+            if candidates and score_summary.best_score <= 1.0:
+                self.log("Low-score candidates: best score near zero; check parsing")
 
             decision = "UNMATCHED"
             confidence = 0.0
@@ -253,14 +264,15 @@ class DistributionEngine:
                 auto, tie = self._decision_for_score(score_summary)
                 force_ask = False
                 if auto and not tie and best:
-                    stopwords = self.config.normalized_stopwords()
                     doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
-                    doc_tokens = set(tokenize(" ".join(doc.opposing_parties), stopwords))
                     token_overlap = doc_tokens & best.folder.tokens
                     surname_overlap = doc_surnames & best.folder.surnames
                     non_surname_overlap = token_overlap - surname_overlap
+                    pair_overlap = doc_pairs & best.folder.person_pairs
                     overlap_count = len(token_overlap)
-                    full_name_match = overlap_count >= 2 and bool(non_surname_overlap)
+                    full_name_match = bool(pair_overlap) or (
+                        overlap_count >= 2 and bool(non_surname_overlap)
+                    )
                     surname_only = bool(token_overlap) and (
                         overlap_count == 1 or token_overlap <= surname_overlap
                     )
