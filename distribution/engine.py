@@ -247,11 +247,11 @@ class DistributionEngine:
                     token_overlap = doc_tokens & best.folder.tokens
                     surname_overlap = doc_surnames & best.folder.surnames
                     non_surname_overlap = token_overlap - surname_overlap
-                    extreme_score = 95.0
-                    if not non_surname_overlap and best.score < extreme_score:
+                    if not non_surname_overlap:
                         auto = False
                         self.log(
-                            "Auto-accept blocked: passes threshold but lacks given-name overlap"
+                            "Auto-accept blocked: surname-only overlap for "
+                            f"{filename} -> {best.folder.folder_name}"
                         )
                 if auto and not tie:
                     decision = "AUTO"
