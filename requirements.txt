@@ -3,3 +3,4 @@ Pillow
 PyQt6
 pytesseract
 requests
+pyinstaller>=6.0
