@@ -4,7 +4,13 @@ import os
 from typing import Iterable
 
 from .models import FolderMeta
-from .scorer import extract_surnames_from_folder, normalize_text, normalize_stopwords, tokenize
+from .scorer import (
+    extract_person_pairs,
+    extract_surnames_from_folder,
+    extract_tokens,
+    normalize_text,
+    normalize_stopwords,
+)
 
 
 def build_folder_index(case_root: str, stopwords: Iterable[str]) -> list[FolderMeta]:
@@ -15,8 +21,9 @@ def build_folder_index(case_root: str, stopwords: Iterable[str]) -> list[FolderM
         if not os.path.isdir(full_path):
             continue
         normalized = normalize_text(name)
-        tokens = {tok for tok in tokenize(name, blocked) if tok}
+        tokens = extract_tokens(name, blocked)
         surnames = extract_surnames_from_folder(name, blocked)
+        person_pairs = extract_person_pairs(name, blocked)
         entries.append(
             FolderMeta(
                 folder_path=full_path,
@@ -24,6 +31,7 @@ def build_folder_index(case_root: str, stopwords: Iterable[str]) -> list[FolderM
                 normalized_name=normalized,
                 tokens=tokens,
                 surnames=surnames,
+                person_pairs=person_pairs,
                 case_numbers=set(),
             )
         )
