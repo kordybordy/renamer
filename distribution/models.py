@@ -15,6 +15,11 @@ class DocumentMeta:
     letter_type: str
     raw_text_excerpt: str | None
     extraction_source: Literal["meta_json", "filename", "ai", "unknown"]
+    tokens: set[str] = field(default_factory=set)
+    surnames: set[str] = field(default_factory=set)
+    person_pairs: set[tuple[str, str]] = field(default_factory=set)
+    normalized_opposing: str = ""
+    cache_ready: bool = False
 
 
 @dataclass
@@ -26,6 +31,13 @@ class FolderMeta:
     surnames: set[str] = field(default_factory=set)
     person_pairs: set[tuple[str, str]] = field(default_factory=set)
     case_numbers: set[str] = field(default_factory=set)
+
+
+@dataclass
+class FolderIndex:
+    folders: list[FolderMeta]
+    token_to_folders: dict[str, list[int]] = field(default_factory=dict)
+    pair_to_folders: dict[tuple[str, str], list[int]] = field(default_factory=dict)
 
 
 @dataclass

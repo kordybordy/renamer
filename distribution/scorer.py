@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Iterable
 
-from .models import DocumentMeta, FolderMeta, MatchCandidate
+from .models import DocumentMeta, FolderIndex, FolderMeta, MatchCandidate
 
 
 DEFAULT_STOPWORDS = [
@@ -247,10 +247,28 @@ def similarity_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, left, right).ratio()
 
 
+def similarity_ratio_normalized(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def ensure_document_cache(doc: DocumentMeta, stopwords: Iterable[str]) -> None:
+    if doc.cache_ready:
+        return
+    doc.normalized_opposing = normalize_text(" ".join(doc.opposing_parties))
+    doc.tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
+    doc.person_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
+    doc.surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
+    doc.cache_ready = True
+
+
 def score_document_to_folder(
     doc: DocumentMeta,
     folder: FolderMeta,
     stopwords: Iterable[str],
+    *,
+    fast_mode: bool = False,
 ) -> MatchCandidate:
     reasons: list[str] = []
     score = 0.0
@@ -261,21 +279,19 @@ def score_document_to_folder(
             score += 100.0
             reasons.append(f"Case number match: {', '.join(sorted(overlap_cases))}")
 
-    doc_person_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
-    pair_overlap = doc_person_pairs & folder.person_pairs
+    ensure_document_cache(doc, stopwords)
+    pair_overlap = doc.person_pairs & folder.person_pairs
     if pair_overlap:
         score += 80.0 * len(pair_overlap)
         formatted_pairs = [f"{left}+{right}" for left, right in sorted(pair_overlap)]
         reasons.append(f"Full person match: {', '.join(formatted_pairs)}")
 
-    doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
-    surname_overlap = doc_surnames & folder.surnames
+    surname_overlap = doc.surnames & folder.surnames
     if surname_overlap:
         score += 15.0 * len(surname_overlap)
         reasons.append(f"Surname overlap: {', '.join(sorted(surname_overlap))}")
 
-    doc_tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
-    token_overlap = doc_tokens & folder.tokens
+    token_overlap = doc.tokens & folder.tokens
     non_surname_overlap = token_overlap - surname_overlap
     if token_overlap:
         token_score = 4.0 * len(token_overlap)
@@ -287,24 +303,26 @@ def score_document_to_folder(
         score += 10.0
         reasons.append("Bonus: surname and given name overlap")
 
-    ratio = similarity_ratio(" ".join(doc.opposing_parties), folder.folder_name)
-    if ratio:
-        ratio_weight = 20.0 if pair_overlap else 10.0
-        score += ratio * ratio_weight
-        reasons.append(f"Name similarity: {ratio:.2f}")
+    ratio = 0.0
+    if not fast_mode or pair_overlap:
+        ratio = similarity_ratio_normalized(doc.normalized_opposing, folder.normalized_name)
+        if ratio:
+            ratio_weight = 20.0 if pair_overlap else 10.0
+            score += ratio * ratio_weight
+            reasons.append(f"Name similarity: {ratio:.2f}")
 
-    mismatch_tokens = _mismatched_surname_tokens(doc_person_pairs, folder.person_pairs)
+    mismatch_tokens = _mismatched_surname_tokens(doc.person_pairs, folder.person_pairs)
     if mismatch_tokens:
         score -= 25.0 * len(mismatch_tokens)
         reasons.append(
             f"Penalty: surname with mismatched given name ({', '.join(mismatch_tokens)})"
         )
 
-    if len(folder.surnames) == 1 and len(doc_surnames) >= 2 and len(surname_overlap) == 1:
+    if len(folder.surnames) == 1 and len(doc.surnames) >= 2 and len(surname_overlap) == 1:
         score -= 10.0
         reasons.append("Penalty: folder has single surname while doc has multiple")
 
-    if len(doc_surnames) >= 2 and not token_overlap:
+    if len(doc.surnames) >= 2 and not token_overlap:
         score -= 5.0
         reasons.append("Penalty: no meaningful token overlap for multi-party doc")
 
@@ -315,7 +333,7 @@ def score_document_to_folder(
             f"Penalty: common given-name-only overlap ({', '.join(sorted(common_given_overlap))})"
         )
 
-    if not pair_overlap and len(token_overlap) == 1 and len(doc_tokens) >= 2:
+    if not pair_overlap and len(token_overlap) == 1 and len(doc.tokens) >= 2:
         score -= 12.0
         reasons.append("Penalty: single-token overlap without pair match")
 
@@ -324,9 +342,9 @@ def score_document_to_folder(
         "token_overlap=%d non_surname_overlap=%d score=%.1f",
         doc.file_name,
         folder.folder_name,
-        sorted(doc_surnames),
+        sorted(doc.surnames),
         sorted(folder.surnames),
-        sorted(doc_tokens),
+        sorted(doc.tokens),
         sorted(folder.tokens),
         len(token_overlap),
         len(non_surname_overlap),
@@ -364,13 +382,29 @@ def _mismatched_surname_tokens(
 
 def score_document(
     doc: DocumentMeta,
-    folders: Iterable[FolderMeta],
+    folders: Iterable[FolderMeta] | FolderIndex,
     stopwords: Iterable[str],
     top_k: int,
+    *,
+    stage2_k: int = 80,
+    candidate_pool_limit: int = 200,
+    fast_mode: bool = False,
 ) -> ScoreSummary:
-    candidate_pool, pool_size = _select_candidate_pool(doc, folders, stopwords, max_pool=300)
+    ensure_document_cache(doc, stopwords)
+    candidate_pool, pool_size = _select_candidate_pool(
+        doc, folders, stopwords, max_pool=candidate_pool_limit
+    )
+    cheap_scores = [
+        (_cheap_score(doc, folder), folder) for folder in candidate_pool
+    ]
+    cheap_scores.sort(
+        key=lambda item: (item[0], item[1].folder_name.lower()), reverse=True
+    )
+    stage2_k = max(top_k, stage2_k)
+    stage2_candidates = [folder for _, folder in cheap_scores[:stage2_k]]
     candidates = [
-        score_document_to_folder(doc, folder, stopwords) for folder in candidate_pool
+        score_document_to_folder(doc, folder, stopwords, fast_mode=fast_mode)
+        for folder in stage2_candidates
     ]
     candidates.sort(key=lambda cand: (cand.score, cand.folder.folder_name.lower()), reverse=True)
     top_candidates = candidates[: max(1, top_k)]
@@ -386,19 +420,39 @@ def score_document(
 
 def _select_candidate_pool(
     doc: DocumentMeta,
-    folders: Iterable[FolderMeta],
+    folders: Iterable[FolderMeta] | FolderIndex,
     stopwords: Iterable[str],
     max_pool: int,
 ) -> tuple[list[FolderMeta], int]:
+    ensure_document_cache(doc, stopwords)
+    if isinstance(folders, FolderIndex):
+        folder_list = folders.folders
+        if not doc.tokens and not doc.person_pairs:
+            return folder_list, len(folder_list)
+        scored_hits: dict[int, int] = {}
+        for token in doc.tokens:
+            for folder_id in folders.token_to_folders.get(token, []):
+                scored_hits[folder_id] = scored_hits.get(folder_id, 0) + 1
+        for pair in doc.person_pairs:
+            for folder_id in folders.pair_to_folders.get(pair, []):
+                scored_hits[folder_id] = scored_hits.get(folder_id, 0) + 3
+        if not scored_hits:
+            return folder_list, len(folder_list)
+        scored = sorted(
+            scored_hits.items(),
+            key=lambda item: (item[1], folder_list[item[0]].folder_name.lower()),
+            reverse=True,
+        )
+        pool = [folder_list[idx] for idx, _ in scored[:max_pool]]
+        return pool, len(pool)
+
     folder_list = list(folders)
-    doc_tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
-    doc_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
-    if not doc_tokens and not doc_pairs:
+    if not doc.tokens and not doc.person_pairs:
         return folder_list, len(folder_list)
     scored: list[tuple[int, FolderMeta]] = []
     for folder in folder_list:
-        token_overlap = doc_tokens & folder.tokens
-        pair_overlap = doc_pairs & folder.person_pairs
+        token_overlap = doc.tokens & folder.tokens
+        pair_overlap = doc.person_pairs & folder.person_pairs
         if not token_overlap and not pair_overlap:
             continue
         overlap_score = len(token_overlap) + (2 * len(pair_overlap))
@@ -408,3 +462,15 @@ def _select_candidate_pool(
     scored.sort(key=lambda item: (item[0], item[1].folder_name.lower()), reverse=True)
     pool = [folder for _, folder in scored[:max_pool]]
     return pool, len(pool)
+
+
+def _cheap_score(doc: DocumentMeta, folder: FolderMeta) -> float:
+    score = 0.0
+    if doc.case_numbers and folder.case_numbers:
+        if set(doc.case_numbers) & set(folder.case_numbers):
+            score += 100.0
+    pair_overlap = doc.person_pairs & folder.person_pairs
+    token_overlap = doc.tokens & folder.tokens
+    surname_overlap = doc.surnames & folder.surnames
+    score += (4.0 * len(pair_overlap)) + (2.0 * len(surname_overlap)) + len(token_overlap)
+    return score

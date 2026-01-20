@@ -104,3 +104,15 @@ def safe_copy(source_path: str, destination_dir: str) -> tuple[str, str]:
 
     shutil.copy2(source_path, dest_path)
     return dest_path, "COPIED"
+
+
+def safe_move(source_path: str, destination_dir: str) -> tuple[str, str]:
+    dest_path, status = resolve_destination_path(source_path, destination_dir)
+    if status == "skip_existing":
+        return dest_path, "SKIPPED"
+
+    if os.path.abspath(source_path) == os.path.abspath(dest_path):
+        raise ValueError("Destination cannot equal source.")
+
+    shutil.move(source_path, dest_path)
+    return dest_path, "MOVED"

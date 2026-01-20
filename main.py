@@ -1480,11 +1480,20 @@ class RenamerGUI(QMainWindow):
 
         unmatched_col = QVBoxLayout()
         unmatched_col.setSpacing(6)
-        unmatched_col.addWidget(QLabel("Unmatched policy:"))
+        unmatched_col.addWidget(QLabel("Handle UNMATCHED files:"))
         self.distribution_unmatched_combo = QComboBox()
         self.distribution_unmatched_combo.addItem("Leave in place", "leave")
-        self.distribution_unmatched_combo.addItem("Copy to UNMATCHED folder", "unmatched_folder")
+        self.distribution_unmatched_combo.addItem("Copy to UNASSIGNED subfolder", "copy")
+        self.distribution_unmatched_combo.addItem("Move to UNASSIGNED subfolder (destructive)", "move")
+        self.distribution_unmatched_combo.setToolTip(
+            "COPY keeps originals. MOVE removes originals from the input folder."
+        )
         unmatched_col.addWidget(self.distribution_unmatched_combo)
+        self.distribution_unassigned_ask_checkbox = QCheckBox("Send ASK to UNASSIGNED too")
+        self.distribution_unassigned_ask_checkbox.setToolTip(
+            "When enabled, ASK files without manual selection are sent to UNASSIGNED."
+        )
+        unmatched_col.addWidget(self.distribution_unassigned_ask_checkbox)
         distribution_layout.addLayout(unmatched_col)
 
         stopwords_col = QVBoxLayout()
@@ -1627,6 +1636,12 @@ class RenamerGUI(QMainWindow):
             "Apply only AUTO/AI items that meet confidence thresholds."
         )
         mode_row.addWidget(self.auto_apply_checkbox)
+        self.distribution_fast_mode_checkbox = QCheckBox("Fast mode (recommended)")
+        self.distribution_fast_mode_checkbox.setToolTip(
+            "Uses smaller candidate pools and skips expensive similarity work when no pair match."
+        )
+        self.distribution_fast_mode_checkbox.setChecked(True)
+        mode_row.addWidget(self.distribution_fast_mode_checkbox)
         mode_row.addStretch()
         mode_group.setLayout(mode_row)
         self.distribution_layout.addWidget(mode_group)
@@ -1812,11 +1827,15 @@ class RenamerGUI(QMainWindow):
         ai_threshold = self.settings.value("distribution_ai_threshold", 0.7)
         top_k = self.settings.value("distribution_top_k", 15)
         unmatched_policy = self.settings.value("distribution_unmatched_policy", "leave")
+        if unmatched_policy == "unmatched_folder":
+            unmatched_policy = "copy"
         stopwords = self.settings.value(
             "distribution_stopwords", ", ".join(DEFAULT_STOPWORDS)
         )
         allow_home = self.settings.value("distribution_allow_home_case_root", False)
         auto_apply = self.settings.value("distribution_auto_apply", False)
+        fast_mode = self.settings.value("distribution_fast_mode", True)
+        unassigned_ask = self.settings.value("distribution_unassigned_include_ask", False)
         self.distribution_auto_threshold_spin.setValue(int(auto_threshold))
         self.distribution_gap_threshold_spin.setValue(int(gap_threshold))
         self.distribution_ai_threshold_spin.setValue(float(ai_threshold))
@@ -1827,6 +1846,8 @@ class RenamerGUI(QMainWindow):
         self.distribution_stopwords_edit.setText(str(stopwords))
         self.allow_home_case_root_checkbox.setChecked(str(allow_home).lower() == "true")
         self.auto_apply_checkbox.setChecked(str(auto_apply).lower() == "true")
+        self.distribution_fast_mode_checkbox.setChecked(str(fast_mode).lower() != "false")
+        self.distribution_unassigned_ask_checkbox.setChecked(str(unassigned_ask).lower() == "true")
         saved_custom = self.settings.value("custom_elements", "{}")
         try:
             self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
@@ -1874,6 +1895,10 @@ class RenamerGUI(QMainWindow):
             "distribution_unmatched_policy", self.distribution_unmatched_combo.currentData()
         )
         self.settings.setValue(
+            "distribution_unassigned_include_ask",
+            self.distribution_unassigned_ask_checkbox.isChecked(),
+        )
+        self.settings.setValue(
             "distribution_stopwords", self.distribution_stopwords_edit.text()
         )
         self.settings.setValue(
@@ -1881,6 +1906,9 @@ class RenamerGUI(QMainWindow):
         )
         self.settings.setValue(
             "distribution_auto_apply", self.auto_apply_checkbox.isChecked()
+        )
+        self.settings.setValue(
+            "distribution_fast_mode", self.distribution_fast_mode_checkbox.isChecked()
         )
 
     def closeEvent(self, event):
@@ -2204,6 +2232,17 @@ class RenamerGUI(QMainWindow):
     # Distribution helpers
     # ------------------------------------------------------
 
+    def describe_unassigned_action(self, action: str, include_ask: bool) -> str:
+        if action == "copy":
+            summary = "Copy UNMATCHED to UNASSIGNED"
+        elif action == "move":
+            summary = "Move UNMATCHED to UNASSIGNED (destructive)"
+        else:
+            summary = "Leave UNMATCHED in place"
+        if include_ask:
+            summary += "; ASK included"
+        return summary
+
     def get_sorted_plan(
         self, plan: list[DistributionPlanItem], sort_mode: str
     ) -> list[DistributionPlanItem]:
@@ -2259,13 +2298,20 @@ class RenamerGUI(QMainWindow):
         stopwords = [word.strip() for word in raw_stopwords.split(",") if word.strip()]
         if not stopwords:
             stopwords = DEFAULT_STOPWORDS[:]
+        fast_mode = self.distribution_fast_mode_checkbox.isChecked()
+        stage2_k = 60 if fast_mode else 80
+        candidate_pool_limit = 120 if fast_mode else 200
         return DistributionConfig(
             auto_threshold=float(self.distribution_auto_threshold_spin.value()),
             gap_threshold=float(self.distribution_gap_threshold_spin.value()),
             ai_threshold=float(self.distribution_ai_threshold_spin.value()),
             top_k=int(self.distribution_topk_spin.value()),
+            stage2_k=stage2_k,
+            candidate_pool_limit=candidate_pool_limit,
+            fast_mode=fast_mode,
             stopwords=stopwords,
-            unmatched_policy=str(self.distribution_unmatched_combo.currentData()),
+            unassigned_action=str(self.distribution_unmatched_combo.currentData()),
+            unassigned_include_ask=self.distribution_unassigned_ask_checkbox.isChecked(),
         )
 
     def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):
@@ -2403,9 +2449,18 @@ class RenamerGUI(QMainWindow):
             )
             return
 
+        config = self.build_distribution_config()
+        unassigned_summary = self.describe_unassigned_action(
+            config.unassigned_action, config.unassigned_include_ask
+        )
         if not self.confirm_batch_summary(
             "Confirm distribution plan",
-            [f"Input folder: {input_dir}", f"Case root: {case_root}"],
+            [
+                f"Input folder: {input_dir}",
+                f"Case root: {case_root}",
+                f"Unassigned handling: {unassigned_summary}",
+                f"Fast mode: {'On' if config.fast_mode else 'Off'}",
+            ],
             dry_run=True,
             file_count=len(pdf_files),
         ):
@@ -2417,7 +2472,6 @@ class RenamerGUI(QMainWindow):
         self.apply_distribution_button.setEnabled(False)
         self.distribution_plan = []
         self.distribution_plan_view = []
-        config = self.build_distribution_config()
         backend = self.get_ai_backend()
         self.start_distribution_ui(len(pdf_files))
         self.distribution_plan_worker = DistributionPlanWorker(
@@ -2476,16 +2530,35 @@ class RenamerGUI(QMainWindow):
             )
             return
 
+        config = self.build_distribution_config()
+        if config.unassigned_action == "move":
+            response = QMessageBox.warning(
+                self,
+                "Confirm destructive move",
+                "MOVE will remove originals from the input folder and place them in UNASSIGNED.\n"
+                "This cannot be undone. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                self.append_distribution_log_message("[SAFETY] Apply cancelled by user")
+                return
+        unassigned_summary = self.describe_unassigned_action(
+            config.unassigned_action, config.unassigned_include_ask
+        )
         if not self.confirm_batch_summary(
             "Confirm distribution apply",
-            [f"Input folder: {input_dir}", f"Case root: {case_root}"],
+            [
+                f"Input folder: {input_dir}",
+                f"Case root: {case_root}",
+                f"Unassigned handling: {unassigned_summary}",
+            ],
             dry_run=False,
             file_count=len(self.distribution_plan),
         ):
             self.append_distribution_log_message("[SAFETY] Apply cancelled by user")
             return
 
-        config = self.build_distribution_config()
         backend = self.get_ai_backend()
         audit_log_path = os.path.join(
             os.path.expanduser("~"), "Renamer", "distribution_audit.log"
