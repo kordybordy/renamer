@@ -15,13 +15,11 @@ from .scorer import (
     COMMON_FIRST_NAMES,
     DEFAULT_STOPWORDS,
     ScoreSummary,
-    extract_person_pairs_from_parties,
-    extract_surnames_from_parties,
-    extract_tokens_from_parties,
-    similarity_ratio,
+    ensure_document_cache,
+    similarity_ratio_normalized,
     score_document,
 )
-from .safety import resolve_destination_path, safe_copy
+from .safety import resolve_destination_path, safe_copy, safe_move
 
 
 @dataclass
@@ -30,10 +28,14 @@ class DistributionConfig:
     gap_threshold: float = 15.0
     ai_threshold: float = 0.7
     top_k: int = 15
+    stage2_k: int = 80
+    candidate_pool_limit: int = 200
+    fast_mode: bool = True
     tie_epsilon: float = 5.0
     ai_max_candidates: int = 5
     stopwords: list[str] = None
-    unmatched_policy: str = "leave"
+    unassigned_action: str = "leave"
+    unassigned_include_ask: bool = False
 
     def normalized_stopwords(self) -> list[str]:
         if self.stopwords is None:
@@ -61,7 +63,7 @@ class DistributionEngine:
         if self.logger:
             self.logger(message)
 
-    def build_index(self) -> list:
+    def build_index(self):
         return build_folder_index(self.case_root, self.config.normalized_stopwords())
 
     def _is_multi_defendant_folder(self, folder: MatchCandidate | None) -> bool:
@@ -226,14 +228,19 @@ class DistributionEngine:
         plan: list[DistributionPlanItem] = []
         total = len(pdf_files)
         processed = 0
+        stopwords = self.config.normalized_stopwords()
         for filename in pdf_files:
             pdf_path = os.path.join(self.input_folder, filename)
             doc = self.build_document_meta(pdf_path, filename)
+            ensure_document_cache(doc, stopwords)
             score_summary = score_document(
                 doc,
                 folder_index,
-                self.config.normalized_stopwords(),
+                stopwords,
                 self.config.top_k,
+                stage2_k=self.config.stage2_k,
+                candidate_pool_limit=self.config.candidate_pool_limit,
+                fast_mode=self.config.fast_mode,
             )
 
             candidates = score_summary.candidates
@@ -241,18 +248,15 @@ class DistributionEngine:
             auto_block_reason = ""
             if best:
                 self.log(
-                    f"Scored: {len(candidates)} candidates for {filename} "
-                    f"(best={best.folder.folder_name} score={best.score:.1f})"
+                    f"Scored {len(candidates)} candidates for {filename}: "
+                    f"best={best.folder.folder_name} score={best.score:.1f}"
                 )
             else:
-                self.log(f"Scored: 0 candidates for {filename}")
-                if not folder_index:
+                self.log(f"Scored 0 candidates for {filename}")
+                folder_count = len(folder_index.folders) if hasattr(folder_index, "folders") else len(folder_index)
+                if folder_count == 0:
                     self.log("No candidates: folder index contained 0 folders")
-
-            stopwords = self.config.normalized_stopwords()
-            doc_tokens = extract_tokens_from_parties(doc.opposing_parties, stopwords)
-            doc_pairs = extract_person_pairs_from_parties(doc.opposing_parties, stopwords)
-            if not doc_tokens and not doc_pairs:
+            if not doc.tokens and not doc.person_pairs:
                 self.log("No candidates: document party parsing returned empty")
             if candidates and score_summary.best_score <= 1.0:
                 self.log("Low-score candidates: best score near zero; check parsing")
@@ -268,11 +272,10 @@ class DistributionEngine:
                 force_ask = False
                 auto_block_reason = ""
                 if auto and not tie and best:
-                    doc_surnames = extract_surnames_from_parties(doc.opposing_parties, stopwords)
-                    token_overlap = doc_tokens & best.folder.tokens
-                    surname_overlap = doc_surnames & best.folder.surnames
+                    token_overlap = doc.tokens & best.folder.tokens
+                    surname_overlap = doc.surnames & best.folder.surnames
                     non_surname_overlap = token_overlap - surname_overlap
-                    pair_overlap = doc_pairs & best.folder.person_pairs
+                    pair_overlap = doc.person_pairs & best.folder.person_pairs
                     overlap_count = len(token_overlap)
                     full_name_match = bool(pair_overlap) or (
                         overlap_count >= 2 and bool(non_surname_overlap)
@@ -350,39 +353,59 @@ class DistributionEngine:
                         reason = ai_reason or "Ambiguous match; needs confirmation"
 
             if decision in ("ASK", "UNMATCHED"):
-                doc_token_list = sorted(doc_tokens)
-                doc_pair_list = sorted(doc_pairs)
+                doc_token_list = sorted(doc.tokens)
+                doc_pair_list = sorted(doc.person_pairs)
                 pool_size = score_summary.candidate_pool_size
                 if candidates:
                     best_candidate = candidates[0]
-                    top_pair_overlap = doc_pairs & best_candidate.folder.person_pairs
-                    top_token_overlap = doc_tokens & best_candidate.folder.tokens
-                    top_similarity = similarity_ratio(
-                        " ".join(doc.opposing_parties), best_candidate.folder.folder_name
+                    top_pair_overlap = doc.person_pairs & best_candidate.folder.person_pairs
+                    top_token_overlap = doc.tokens & best_candidate.folder.tokens
+                    top_similarity = similarity_ratio_normalized(
+                        doc.normalized_opposing, best_candidate.folder.normalized_name
+                    )
+                    logger = logging.getLogger(__name__)
+                    logger.debug(
+                        "Match diagnostics: decision=%s file=%s tokens=%s pairs=%d pool=%d best=%s "
+                        "score=%.1f pair_matches=%d token_overlap=%d similarity=%.2f auto_block=%s",
+                        decision,
+                        filename,
+                        doc_token_list,
+                        len(doc_pair_list),
+                        pool_size,
+                        best_candidate.folder.folder_name,
+                        best_candidate.score,
+                        len(top_pair_overlap),
+                        len(top_token_overlap),
+                        top_similarity,
+                        auto_block_reason or "n/a",
                     )
                     self.log(
-                        "Match diagnostics: "
-                        f"decision={decision} file={filename} "
-                        f"tokens={doc_token_list} pairs={len(doc_pair_list)} "
-                        f"pool={pool_size} best={best_candidate.folder.folder_name} "
-                        f"score={best_candidate.score:.1f} pair_matches={len(top_pair_overlap)} "
-                        f"token_overlap={len(top_token_overlap)} similarity={top_similarity:.2f} "
+                        f"Match diagnostics: decision={decision} file={filename} "
+                        f"best={best_candidate.folder.folder_name} score={best_candidate.score:.1f} "
                         f"auto_block={auto_block_reason or 'n/a'}"
                     )
                 else:
+                    logger = logging.getLogger(__name__)
+                    logger.debug(
+                        "Match diagnostics: decision=%s file=%s tokens=%s pairs=%d pool=%d best=None "
+                        "score=0.0 auto_block=%s",
+                        decision,
+                        filename,
+                        doc_token_list,
+                        len(doc_pair_list),
+                        pool_size,
+                        auto_block_reason or "n/a",
+                    )
                     self.log(
-                        "Match diagnostics: "
-                        f"decision={decision} file={filename} "
-                        f"tokens={doc_token_list} pairs={len(doc_pair_list)} "
-                        f"pool={pool_size} best=None score=0.0 "
-                        f"auto_block={auto_block_reason or 'n/a'}"
+                        f"Match diagnostics: decision={decision} file={filename} "
+                        f"best=None auto_block={auto_block_reason or 'n/a'}"
                     )
                 logger = logging.getLogger(__name__)
                 if candidates:
                     top_three = candidates[:3]
                     for idx, candidate in enumerate(top_three, start=1):
-                        pair_overlap = doc_pairs & candidate.folder.person_pairs
-                        token_overlap = doc_tokens & candidate.folder.tokens
+                        pair_overlap = doc.person_pairs & candidate.folder.person_pairs
+                        token_overlap = doc.tokens & candidate.folder.tokens
                         logger.debug(
                             "Debug match #%d file=%s folder=%s tokens=%s pairs=%s pair_overlap=%s token_overlap=%s",
                             idx,
@@ -438,8 +461,14 @@ class DistributionEngine:
                 continue
 
             target_folder = item.chosen_folder
-            if not target_folder and self.config.unmatched_policy == "unmatched_folder":
-                target_folder = os.path.join(self.case_root, "UNMATCHED")
+            unassigned_action = self.config.unassigned_action
+            send_ask = self.config.unassigned_include_ask
+            should_unassign = (
+                decision == "UNMATCHED"
+                or (decision == "ASK" and send_ask and not item.chosen_folder)
+            )
+            if not target_folder and should_unassign and unassigned_action in ("copy", "move"):
+                target_folder = os.path.join(self.case_root, "UNASSIGNED")
 
             if not target_folder:
                 self.log(f"UNMATCHED -> {os.path.basename(item.source_pdf)}")
@@ -450,7 +479,10 @@ class DistributionEngine:
                 continue
 
             try:
-                dest_path, result = safe_copy(item.source_pdf, target_folder)
+                if should_unassign and unassigned_action == "move":
+                    dest_path, result = safe_move(item.source_pdf, target_folder)
+                else:
+                    dest_path, result = safe_copy(item.source_pdf, target_folder)
                 item.dest_path = dest_path
                 self.log(f"{result} -> {os.path.basename(target_folder)}")
                 self._append_audit_log(audit_log_path, item, result)
