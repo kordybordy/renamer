@@ -975,6 +975,7 @@ class DistributionPlanWorker(QThread):
         case_root: str,
         config: DistributionConfig,
         ai_provider: str,
+        audit_log_path: str | None,
     ):
         super().__init__()
         self.input_dir = input_dir
@@ -982,6 +983,7 @@ class DistributionPlanWorker(QThread):
         self.case_root = case_root
         self.config = config
         self.ai_provider = ai_provider
+        self.audit_log_path = audit_log_path
 
     def run(self):
         try:
@@ -997,6 +999,7 @@ class DistributionPlanWorker(QThread):
                 progress_cb=lambda processed, total, status: self.progress.emit(
                     processed, total, status
                 ),
+                audit_log_path=self.audit_log_path,
             )
             self.plan_ready.emit(plan)
         except Exception as e:
@@ -1649,6 +1652,20 @@ class RenamerGUI(QMainWindow):
             "Apply only AUTO/AI items that meet confidence thresholds."
         )
         mode_row.addWidget(self.auto_apply_checkbox)
+        self.distribution_apply_during_planning_checkbox = QCheckBox(
+            "Apply AUTO matches during planning (fast workflow)"
+        )
+        self.distribution_apply_during_planning_checkbox.setToolTip(
+            "When enabled, AUTO matches are copied immediately while the plan is built."
+        )
+        mode_row.addWidget(self.distribution_apply_during_planning_checkbox)
+        self.distribution_use_ai_tiebreaker_checkbox = QCheckBox(
+            "Use AI tie-breaker for ambiguous matches"
+        )
+        self.distribution_use_ai_tiebreaker_checkbox.setToolTip(
+            "When enabled, AI can pick between close folder matches."
+        )
+        mode_row.addWidget(self.distribution_use_ai_tiebreaker_checkbox)
         self.distribution_fast_mode_checkbox = QCheckBox("Fast mode (recommended)")
         self.distribution_fast_mode_checkbox.setToolTip(
             "Uses smaller candidate pools and skips expensive similarity work when no pair match."
@@ -1719,9 +1736,16 @@ class RenamerGUI(QMainWindow):
         plan_controls.addWidget(self.distribution_unresolved_workset_button)
         plan_controls.addStretch()
         plan_layout.addLayout(plan_controls)
-        self.distribution_plan_table = QTableWidget(0, 5)
+        self.distribution_plan_table = QTableWidget(0, 6)
         self.distribution_plan_table.setHorizontalHeaderLabels(
-            ["PDF", "Decision", "Chosen folder", "Confidence", "Select folder (ASK)"]
+            [
+                "PDF",
+                "Decision",
+                "Chosen folder",
+                "Confidence",
+                "Result",
+                "Select folder (ASK)",
+            ]
         )
         self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
@@ -1737,6 +1761,9 @@ class RenamerGUI(QMainWindow):
         )
         self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.distribution_plan_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.ResizeToContents
         )
         self.distribution_plan_table.setEditTriggers(
             self.distribution_plan_table.EditTrigger.NoEditTriggers
@@ -1857,6 +1884,12 @@ class RenamerGUI(QMainWindow):
         )
         allow_home = self.settings.value("distribution_allow_home_case_root", False)
         auto_apply = self.settings.value("distribution_auto_apply", False)
+        apply_during_planning = self.settings.value(
+            "distribution_apply_during_planning", False
+        )
+        use_ai_tiebreaker = self.settings.value(
+            "distribution_use_ai_tiebreaker", False
+        )
         fast_mode = self.settings.value("distribution_fast_mode", True)
         unassigned_ask = self.settings.value("distribution_unassigned_include_ask", False)
         self.distribution_auto_threshold_spin.setValue(int(auto_threshold))
@@ -1872,6 +1905,12 @@ class RenamerGUI(QMainWindow):
         self.distribution_stopwords_edit.setText(str(stopwords))
         self.allow_home_case_root_checkbox.setChecked(str(allow_home).lower() == "true")
         self.auto_apply_checkbox.setChecked(str(auto_apply).lower() == "true")
+        self.distribution_apply_during_planning_checkbox.setChecked(
+            str(apply_during_planning).lower() == "true"
+        )
+        self.distribution_use_ai_tiebreaker_checkbox.setChecked(
+            str(use_ai_tiebreaker).lower() == "true"
+        )
         self.distribution_fast_mode_checkbox.setChecked(str(fast_mode).lower() != "false")
         self.distribution_unassigned_ask_checkbox.setChecked(str(unassigned_ask).lower() == "true")
         saved_custom = self.settings.value("custom_elements", "{}")
@@ -1936,6 +1975,14 @@ class RenamerGUI(QMainWindow):
         )
         self.settings.setValue(
             "distribution_auto_apply", self.auto_apply_checkbox.isChecked()
+        )
+        self.settings.setValue(
+            "distribution_apply_during_planning",
+            self.distribution_apply_during_planning_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            "distribution_use_ai_tiebreaker",
+            self.distribution_use_ai_tiebreaker_checkbox.isChecked(),
         )
         self.settings.setValue(
             "distribution_fast_mode", self.distribution_fast_mode_checkbox.isChecked()
@@ -2124,8 +2171,18 @@ class RenamerGUI(QMainWindow):
         self.apply_distribution_filter()
         self.apply_distribution_button.setEnabled(bool(plan))
         if plan:
+            copied_during_planning = sum(
+                1 for item in plan if item.result and item.result.startswith("COPIED")
+            )
+            unresolved = sum(
+                1
+                for item in plan
+                if item.decision in ("ASK", "UNMATCHED")
+            )
             self.append_distribution_log_message(
-                f"Plan ready: {len(plan)} files. Review ASK rows before applying."
+                f"Plan ready: {len(plan)} files. "
+                f"Copied during planning: {copied_during_planning}. "
+                f"Remaining ASK/UNMATCHED: {unresolved}."
             )
 
     def handle_distribution_finished(self):
@@ -2142,6 +2199,10 @@ class RenamerGUI(QMainWindow):
             self.distribution_apply_worker = None
         else:
             QMessageBox.information(self, "Distribution complete", "Finished building the plan.")
+            if self.distribution_audit_log_path:
+                self.append_distribution_log_message(
+                    f"Audit log saved to: {self.distribution_audit_log_path}"
+                )
         self.distribution_plan_worker = None
 
     # ------------------------------------------------------
@@ -2429,6 +2490,7 @@ class RenamerGUI(QMainWindow):
             auto_threshold=float(self.distribution_auto_threshold_spin.value()),
             gap_threshold=float(self.distribution_gap_threshold_spin.value()),
             ai_threshold=float(self.distribution_ai_threshold_spin.value()),
+            enable_ai_tiebreaker=self.distribution_use_ai_tiebreaker_checkbox.isChecked(),
             top_k=int(self.distribution_topk_spin.value()),
             stage2_k=stage2_k,
             candidate_pool_limit=candidate_pool_limit,
@@ -2437,6 +2499,7 @@ class RenamerGUI(QMainWindow):
             unassigned_action=str(self.distribution_unmatched_combo.currentData()),
             unassigned_include_ask=self.distribution_unassigned_ask_checkbox.isChecked(),
             dest_exists_policy=str(self.distribution_dest_exists_combo.currentData()),
+            apply_during_planning=self.distribution_apply_during_planning_checkbox.isChecked(),
         )
 
     def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):
@@ -2454,10 +2517,14 @@ class RenamerGUI(QMainWindow):
             chosen_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
             confidence_item = QTableWidgetItem(f"{item.confidence:.2f}")
             confidence_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
+            result_text = item.result or "—"
+            result_item = QTableWidgetItem(result_text)
+            result_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
             self.distribution_plan_table.setItem(row, 0, name_item)
             self.distribution_plan_table.setItem(row, 1, decision_item)
             self.distribution_plan_table.setItem(row, 2, chosen_item)
             self.distribution_plan_table.setItem(row, 3, confidence_item)
+            self.distribution_plan_table.setItem(row, 4, result_item)
 
             chooser = QComboBox()
             top_candidates = item.candidates[:5]
@@ -2486,7 +2553,9 @@ class RenamerGUI(QMainWindow):
 
             chooser.setProperty("row_id", item.source_pdf)
             chooser.currentIndexChanged.connect(self.on_distribution_choice_changed)
-            self.distribution_plan_table.setCellWidget(row, 4, chooser)
+            if item.result and item.result.startswith("COPIED"):
+                chooser.setEnabled(False)
+            self.distribution_plan_table.setCellWidget(row, 5, chooser)
 
         self.distribution_plan_table.resizeRowsToContents()
 
@@ -2512,12 +2581,15 @@ class RenamerGUI(QMainWindow):
             decision_item = self.distribution_plan_table.item(row, 1)
             chosen_item = self.distribution_plan_table.item(row, 2)
             confidence_item = self.distribution_plan_table.item(row, 3)
+            result_item = self.distribution_plan_table.item(row, 4)
             if decision_item:
                 decision_item.setText(plan_item.decision)
             if chosen_item:
                 chosen_item.setText(chosen_name)
             if confidence_item:
                 confidence_item.setText(f"{plan_item.confidence:.2f}")
+            if result_item:
+                result_item.setText(plan_item.result or "—")
             break
 
     def on_distribution_choice_changed(self, _index: int = 0):
@@ -2626,6 +2698,24 @@ class RenamerGUI(QMainWindow):
         unassigned_summary = self.describe_unassigned_action(
             config.unassigned_action, config.unassigned_include_ask
         )
+        apply_during_planning = config.apply_during_planning
+        audit_log_path = None
+        if apply_during_planning:
+            response = QMessageBox.warning(
+                self,
+                "Confirm streaming apply",
+                "AUTO matches will be copied immediately while the plan is built.\n"
+                "This is not a dry run. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                self.append_distribution_log_message("[SAFETY] Distribution cancelled by user")
+                return
+            audit_log_path = os.path.join(
+                os.path.expanduser("~"), "Renamer", "distribution_audit.log"
+            )
+            self.distribution_audit_log_path = audit_log_path
         if not self.confirm_batch_summary(
             "Confirm distribution plan",
             [
@@ -2633,8 +2723,9 @@ class RenamerGUI(QMainWindow):
                 f"Case root: {case_root}",
                 f"Unassigned handling: {unassigned_summary}",
                 f"Fast mode: {'On' if config.fast_mode else 'Off'}",
+                f"Streaming apply: {'On' if apply_during_planning else 'Off'}",
             ],
-            dry_run=True,
+            dry_run=not apply_during_planning,
             file_count=len(pdf_files),
         ):
             self.append_distribution_log_message("[SAFETY] Distribution cancelled by user")
@@ -2645,6 +2736,8 @@ class RenamerGUI(QMainWindow):
         self.apply_distribution_button.setEnabled(False)
         self.distribution_plan = []
         self.distribution_plan_view = []
+        if not apply_during_planning:
+            self.distribution_audit_log_path = None
         backend = self.get_ai_backend()
         self.start_distribution_ui(len(pdf_files))
         self.distribution_plan_worker = DistributionPlanWorker(
@@ -2653,6 +2746,7 @@ class RenamerGUI(QMainWindow):
             case_root=case_root,
             config=config,
             ai_provider=backend,
+            audit_log_path=audit_log_path,
         )
         self.distribution_plan_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_plan_worker.log_ready.connect(self.handle_distribution_log)

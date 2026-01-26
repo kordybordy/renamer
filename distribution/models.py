@@ -57,3 +57,4 @@ class DistributionPlanItem:
     confidence: float
     reason: str
     dest_path: str | None
+    result: str | None = None
