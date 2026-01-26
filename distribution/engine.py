@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
@@ -270,6 +271,7 @@ class DistributionEngine:
         pdf_files: list[str],
         *,
         progress_cb: Callable[[int, int, str], None] | None = None,
+        pause_event: threading.Event | None = None,
         audit_log_path: str | None = None,
     ) -> list[DistributionPlanItem]:
         folder_index = self.build_index()
@@ -280,6 +282,8 @@ class DistributionEngine:
             os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
         stopwords = self.config.normalized_stopwords()
         for filename in pdf_files:
+            if pause_event is not None:
+                pause_event.wait()
             pdf_path = os.path.join(self.input_folder, filename)
             doc = self.build_document_meta(pdf_path, filename)
             ensure_document_cache(doc, stopwords)
@@ -632,6 +636,7 @@ class DistributionEngine:
         auto_only: bool,
         audit_log_path: str,
         progress_cb: Callable[[int, int, str], None] | None = None,
+        pause_event: threading.Event | None = None,
     ) -> None:
         os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
         total = len(plan)
@@ -642,6 +647,8 @@ class DistributionEngine:
         unmatched_count = 0
         ask_unresolved_count = 0
         for item in plan:
+            if pause_event is not None:
+                pause_event.wait()
             if item.result and (
                 item.result.startswith("COPIED")
                 or item.result.startswith("SKIPPED (dest_exists)")
