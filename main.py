@@ -976,6 +976,7 @@ class DistributionPlanWorker(QThread):
         config: DistributionConfig,
         ai_provider: str,
         audit_log_path: str | None,
+        pause_event: threading.Event | None = None,
     ):
         super().__init__()
         self.input_dir = input_dir
@@ -984,6 +985,7 @@ class DistributionPlanWorker(QThread):
         self.config = config
         self.ai_provider = ai_provider
         self.audit_log_path = audit_log_path
+        self.pause_event = pause_event
 
     def run(self):
         try:
@@ -999,6 +1001,7 @@ class DistributionPlanWorker(QThread):
                 progress_cb=lambda processed, total, status: self.progress.emit(
                     processed, total, status
                 ),
+                pause_event=self.pause_event,
                 audit_log_path=self.audit_log_path,
             )
             self.plan_ready.emit(plan)
@@ -1024,6 +1027,7 @@ class DistributionApplyWorker(QThread):
         plan: List[DistributionPlanItem],
         auto_only: bool,
         audit_log_path: str,
+        pause_event: threading.Event | None = None,
     ):
         super().__init__()
         self.input_dir = input_dir
@@ -1033,6 +1037,7 @@ class DistributionApplyWorker(QThread):
         self.plan = plan
         self.auto_only = auto_only
         self.audit_log_path = audit_log_path
+        self.pause_event = pause_event
 
     def run(self):
         try:
@@ -1050,6 +1055,7 @@ class DistributionApplyWorker(QThread):
                 progress_cb=lambda processed, total, status: self.progress.emit(
                     processed, total, status
                 ),
+                pause_event=self.pause_event,
             )
         except Exception as e:
             log_exception(e)
@@ -1080,6 +1086,8 @@ class RenamerGUI(QMainWindow):
         self.distribution_plan_worker: DistributionPlanWorker | None = None
         self.distribution_apply_worker: DistributionApplyWorker | None = None
         self.distribution_audit_log_path: str | None = None
+        self.distribution_pause_event = threading.Event()
+        self.distribution_pause_event.set()
         self.custom_elements: dict[str, str] = {}
 
         central_widget = QWidget()
@@ -1695,6 +1703,10 @@ class RenamerGUI(QMainWindow):
         self.apply_distribution_button.setEnabled(False)
         self.apply_distribution_button.clicked.connect(self.on_apply_distribution_clicked)
         dist_controls.addWidget(self.apply_distribution_button)
+        self.pause_distribution_button = QPushButton("PAUSE")
+        self.pause_distribution_button.setEnabled(False)
+        self.pause_distribution_button.clicked.connect(self.on_pause_distribution_clicked)
+        dist_controls.addWidget(self.pause_distribution_button)
         dist_controls_group.setLayout(dist_controls)
         self.distribution_layout.addWidget(dist_controls_group)
 
@@ -2041,6 +2053,10 @@ class RenamerGUI(QMainWindow):
         self.apply_distribution_button.setDisabled(True)
         self.distribution_input_button.setDisabled(True)
         self.case_root_button.setDisabled(True)
+        if hasattr(self, "pause_distribution_button"):
+            self.pause_distribution_button.setDisabled(False)
+            self.pause_distribution_button.setText("PAUSE")
+        self.distribution_pause_event.set()
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(True)
         self.distribution_status_label.setText("Processing…")
@@ -2052,6 +2068,10 @@ class RenamerGUI(QMainWindow):
         self.distribution_input_button.setDisabled(False)
         self.case_root_button.setDisabled(False)
         self.apply_distribution_button.setEnabled(bool(self.distribution_plan))
+        if hasattr(self, "pause_distribution_button"):
+            self.pause_distribution_button.setDisabled(True)
+            self.pause_distribution_button.setText("PAUSE")
+        self.distribution_pause_event.set()
         for btn in (self.play_button, self.btn_process, self.btn_all):
             btn.setDisabled(False)
         self.distribution_status_label.setText(status)
@@ -2204,6 +2224,29 @@ class RenamerGUI(QMainWindow):
                     f"Audit log saved to: {self.distribution_audit_log_path}"
                 )
         self.distribution_plan_worker = None
+
+    def on_pause_distribution_clicked(self):
+        if not hasattr(self, "pause_distribution_button"):
+            return
+        worker_running = (
+            self.distribution_plan_worker
+            and self.distribution_plan_worker.isRunning()
+        ) or (
+            self.distribution_apply_worker
+            and self.distribution_apply_worker.isRunning()
+        )
+        if not worker_running:
+            return
+        if self.distribution_pause_event.is_set():
+            self.distribution_pause_event.clear()
+            self.distribution_status_label.setText("Paused")
+            self.pause_distribution_button.setText("RESUME")
+            self.append_distribution_log_message("[DISTRIBUTE] Paused by user")
+        else:
+            self.distribution_pause_event.set()
+            self.distribution_status_label.setText("Processing…")
+            self.pause_distribution_button.setText("PAUSE")
+            self.append_distribution_log_message("[DISTRIBUTE] Resumed by user")
 
     # ------------------------------------------------------
     # Safety helpers
@@ -2747,6 +2790,7 @@ class RenamerGUI(QMainWindow):
             config=config,
             ai_provider=backend,
             audit_log_path=audit_log_path,
+            pause_event=self.distribution_pause_event,
         )
         self.distribution_plan_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_plan_worker.log_ready.connect(self.handle_distribution_log)
@@ -2843,6 +2887,7 @@ class RenamerGUI(QMainWindow):
             plan=plan_to_apply,
             auto_only=auto_only,
             audit_log_path=audit_log_path,
+            pause_event=self.distribution_pause_event,
         )
         self.distribution_apply_worker.progress.connect(self.handle_distribution_progress)
         self.distribution_apply_worker.log_ready.connect(self.handle_distribution_log)
