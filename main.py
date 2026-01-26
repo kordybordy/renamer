@@ -2181,6 +2181,21 @@ class RenamerGUI(QMainWindow):
         log_filesystem_action("COPY", source_path, final_path, status="success")
         return final_path
 
+    def should_skip_pozew(self, destination_dir: str, target_name: str) -> tuple[bool, str | None]:
+        if "pozew" not in target_name.lower():
+            return False, None
+        if not os.path.isdir(destination_dir):
+            return False, None
+        try:
+            for filename in os.listdir(destination_dir):
+                if not filename.lower().endswith(".pdf"):
+                    continue
+                if "pozew" in filename.lower():
+                    return True, os.path.join(destination_dir, filename)
+        except OSError as exc:
+            log_info(f"[SKIP] Failed to scan destination for pozew: {exc}")
+        return False, None
+
     # ------------------------------------------------------
     # Load PDFs
     # ------------------------------------------------------
@@ -2900,6 +2915,13 @@ class RenamerGUI(QMainWindow):
         out = os.path.join(out_folder, target_name)
 
         try:
+            should_skip, existing_path = self.should_skip_pozew(out_folder, target_name)
+            if should_skip:
+                message = f"Pozew already exists in output folder:\n{existing_path}"
+                self.append_status_message(f"[SKIP] {pdf_name} → {message}")
+                QMessageBox.information(self, "Skipped", message)
+                self.update_processing_progress(total=1, processed_override=1)
+                return
             final_path = self.plan_or_copy_file(inp, out_folder, target_name, dry_run=dry_run)
             if self.current_index in self.file_results:
                 self.file_results[self.current_index]["filename"] = os.path.basename(final_path)
@@ -2982,6 +3004,15 @@ class RenamerGUI(QMainWindow):
                 self.file_results[idx]["filename"] = target_name
 
                 inp_path = os.path.join(input_folder, pdf_name)
+                should_skip, existing_path = self.should_skip_pozew(out_folder, target_name)
+                if should_skip:
+                    self.append_status_message(
+                        f"[SKIP] {pdf_name} → Pozew already exists ({existing_path})"
+                    )
+                    self.update_processing_progress(
+                        total=len(self.pdf_files), processed_override=idx + 1
+                    )
+                    continue
                 planned_path = self.plan_or_copy_file(
                     inp_path, out_folder, target_name, dry_run=dry_run
                 )
