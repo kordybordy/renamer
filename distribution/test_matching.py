@@ -7,6 +7,8 @@ from distribution.scorer import (
     normalize_text,
     score_document,
 )
+from distribution.engine import DistributionConfig, DistributionEngine
+from distribution.models import DistributionPlanItem
 
 
 def make_doc(opposing_parties: list[str], filename: str) -> DocumentMeta:
@@ -106,3 +108,67 @@ def test_given_name_only_trap_is_penalized() -> None:
     wrong = make_folder("GRAZYNA_KOWALSKA")
     summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
     assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_apply_plan_ask_selection_respected(tmp_path) -> None:
+    input_dir = tmp_path / "input"
+    case_root = tmp_path / "cases"
+    input_dir.mkdir()
+    case_root.mkdir()
+    case_folder = case_root / "CASE_A"
+    case_folder.mkdir()
+
+    file_one = input_dir / "doc1.pdf"
+    file_two = input_dir / "doc2.pdf"
+    file_one.write_text("alpha")
+    file_two.write_text("beta")
+
+    plan = [
+        DistributionPlanItem(
+            source_pdf=str(file_one),
+            chosen_folder=str(case_folder),
+            candidates=[],
+            decision="ASK",
+            confidence=0.0,
+            reason="Needs confirmation",
+            dest_path=None,
+        ),
+        DistributionPlanItem(
+            source_pdf=str(file_two),
+            chosen_folder=None,
+            candidates=[],
+            decision="ASK",
+            confidence=0.0,
+            reason="Needs confirmation",
+            dest_path=None,
+        ),
+    ]
+
+    log_entries: list[str] = []
+    engine = DistributionEngine(
+        input_folder=str(input_dir),
+        case_root=str(case_root),
+        config=DistributionConfig(
+            auto_threshold=70.0,
+            gap_threshold=15.0,
+            ai_threshold=0.7,
+            top_k=15,
+            stage2_k=80,
+            candidate_pool_limit=200,
+            fast_mode=True,
+            stopwords=DEFAULT_STOPWORDS[:],
+            unassigned_action="leave",
+            unassigned_include_ask=False,
+        ),
+        ai_provider="openai",
+        logger=log_entries.append,
+    )
+
+    audit_log = tmp_path / "audit.log"
+    engine.apply_plan(plan, auto_only=False, audit_log_path=str(audit_log))
+
+    assert (case_folder / "doc1.pdf").exists()
+    assert not (case_folder / "doc2.pdf").exists()
+    audit_contents = audit_log.read_text(encoding="utf-8")
+    assert "doc2.pdf" in audit_contents
+    assert "SKIPPED (unresolved_ask)" in audit_contents

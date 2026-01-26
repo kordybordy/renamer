@@ -451,10 +451,18 @@ class DistributionEngine:
         os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
         total = len(plan)
         processed = 0
+        copied_count = 0
+        skipped_count = 0
+        unmatched_count = 0
+        ask_unresolved_count = 0
         for item in plan:
             decision = item.decision
-            if auto_only and decision not in ("AUTO", "AI"):
-                self._append_audit_log(audit_log_path, item, "SKIPPED")
+            if auto_only and decision not in ("AUTO", "AI") and not (
+                decision == "ASK" and item.chosen_folder
+            ):
+                self._append_audit_log(audit_log_path, item, "SKIPPED (auto_apply_only)")
+                self.log(f"SKIPPED (auto_apply_only) -> {os.path.basename(item.source_pdf)}")
+                skipped_count += 1
                 processed += 1
                 if progress_cb:
                     progress_cb(processed, total, f"Applied {processed}/{total}")
@@ -470,9 +478,45 @@ class DistributionEngine:
             if not target_folder and should_unassign and unassigned_action in ("copy", "move"):
                 target_folder = os.path.join(self.case_root, "UNASSIGNED")
 
+            if decision == "ASK" and not item.chosen_folder and not (
+                should_unassign and unassigned_action in ("copy", "move")
+            ):
+                self._append_audit_log(audit_log_path, item, "SKIPPED (unresolved_ask)")
+                self.log(f"SKIPPED (unresolved_ask) -> {os.path.basename(item.source_pdf)}")
+                skipped_count += 1
+                ask_unresolved_count += 1
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total, f"Applied {processed}/{total}")
+                continue
+
+            if decision == "UNMATCHED" and not (
+                should_unassign and unassigned_action in ("copy", "move")
+            ):
+                self._append_audit_log(audit_log_path, item, "SKIPPED (unmatched)")
+                self.log(f"SKIPPED (unmatched) -> {os.path.basename(item.source_pdf)}")
+                skipped_count += 1
+                unmatched_count += 1
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total, f"Applied {processed}/{total}")
+                continue
+
             if not target_folder:
-                self.log(f"UNMATCHED -> {os.path.basename(item.source_pdf)}")
-                self._append_audit_log(audit_log_path, item, "SKIPPED")
+                self.log(f"SKIPPED (invalid_target) -> {os.path.basename(item.source_pdf)}")
+                self._append_audit_log(audit_log_path, item, "SKIPPED (invalid_target)")
+                skipped_count += 1
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total, f"Applied {processed}/{total}")
+                continue
+
+            case_root_abs = os.path.abspath(self.case_root)
+            target_abs = os.path.abspath(target_folder)
+            if os.path.commonpath([case_root_abs, target_abs]) != case_root_abs:
+                self.log(f"SKIPPED (safety_guard) -> {os.path.basename(item.source_pdf)}")
+                self._append_audit_log(audit_log_path, item, "SKIPPED (safety_guard)")
+                skipped_count += 1
                 processed += 1
                 if progress_cb:
                     progress_cb(processed, total, f"Applied {processed}/{total}")
@@ -484,6 +528,11 @@ class DistributionEngine:
                 else:
                     dest_path, result = safe_copy(item.source_pdf, target_folder)
                 item.dest_path = dest_path
+                if result == "SKIPPED":
+                    result = "SKIPPED (dest_exists)"
+                    skipped_count += 1
+                else:
+                    copied_count += 1
                 self.log(f"{result} -> {os.path.basename(target_folder)}")
                 self._append_audit_log(audit_log_path, item, result)
             except Exception as exc:
@@ -492,6 +541,11 @@ class DistributionEngine:
             processed += 1
             if progress_cb:
                 progress_cb(processed, total, f"Applied {processed}/{total}")
+        self.log(
+            "Apply summary: "
+            f"COPIED={copied_count} SKIPPED={skipped_count} "
+            f"UNMATCHED={unmatched_count} ASK_UNRESOLVED={ask_unresolved_count}"
+        )
 
     def _append_audit_log(self, path: str, item: DistributionPlanItem, result: str) -> None:
         top_candidates = ", ".join(

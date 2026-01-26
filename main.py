@@ -2321,12 +2321,18 @@ class RenamerGUI(QMainWindow):
         for row, item in enumerate(plan):
             filename = os.path.basename(item.source_pdf)
             chosen_name = os.path.basename(item.chosen_folder) if item.chosen_folder else "—"
-            self.distribution_plan_table.setItem(row, 0, QTableWidgetItem(filename))
-            self.distribution_plan_table.setItem(row, 1, QTableWidgetItem(item.decision))
-            self.distribution_plan_table.setItem(row, 2, QTableWidgetItem(chosen_name))
-            self.distribution_plan_table.setItem(
-                row, 3, QTableWidgetItem(f"{item.confidence:.2f}")
-            )
+            name_item = QTableWidgetItem(filename)
+            name_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
+            decision_item = QTableWidgetItem(item.decision)
+            decision_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
+            chosen_item = QTableWidgetItem(chosen_name)
+            chosen_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
+            confidence_item = QTableWidgetItem(f"{item.confidence:.2f}")
+            confidence_item.setData(Qt.ItemDataRole.UserRole, item.source_pdf)
+            self.distribution_plan_table.setItem(row, 0, name_item)
+            self.distribution_plan_table.setItem(row, 1, decision_item)
+            self.distribution_plan_table.setItem(row, 2, chosen_item)
+            self.distribution_plan_table.setItem(row, 3, confidence_item)
 
             chooser = QComboBox()
             top_candidates = item.candidates[:5]
@@ -2337,6 +2343,14 @@ class RenamerGUI(QMainWindow):
                         f"{candidate.folder.folder_name} ({candidate.score:.1f})",
                         candidate.folder.folder_path,
                     )
+                if item.chosen_folder and item.chosen_folder not in [
+                    cand.folder.folder_path for cand in top_candidates
+                ]:
+                    chooser.addItem(os.path.basename(item.chosen_folder), item.chosen_folder)
+                if item.chosen_folder:
+                    chosen_index = chooser.findData(item.chosen_folder)
+                    if chosen_index >= 0:
+                        chooser.setCurrentIndex(chosen_index)
                 chooser.setEnabled(True)
             elif item.chosen_folder:
                 chooser.addItem(chosen_name, item.chosen_folder)
@@ -2345,34 +2359,68 @@ class RenamerGUI(QMainWindow):
                 chooser.addItem("—", "")
                 chooser.setEnabled(False)
 
+            chooser.setProperty("row_id", item.source_pdf)
+            chooser.currentIndexChanged.connect(self.on_distribution_choice_changed)
             self.distribution_plan_table.setCellWidget(row, 4, chooser)
 
         self.distribution_plan_table.resizeRowsToContents()
 
+    def find_distribution_plan_item(self, row_id: str) -> DistributionPlanItem | None:
+        if not row_id:
+            return None
+        for item in self.distribution_plan:
+            if item.source_pdf == row_id:
+                return item
+        return None
+
+    def update_distribution_plan_row_display(self, row_id: str):
+        if not row_id:
+            return
+        for row in range(self.distribution_plan_table.rowCount()):
+            name_item = self.distribution_plan_table.item(row, 0)
+            if not name_item or name_item.data(Qt.ItemDataRole.UserRole) != row_id:
+                continue
+            plan_item = self.find_distribution_plan_item(row_id)
+            if not plan_item:
+                return
+            chosen_name = os.path.basename(plan_item.chosen_folder) if plan_item.chosen_folder else "—"
+            decision_item = self.distribution_plan_table.item(row, 1)
+            chosen_item = self.distribution_plan_table.item(row, 2)
+            confidence_item = self.distribution_plan_table.item(row, 3)
+            if decision_item:
+                decision_item.setText(plan_item.decision)
+            if chosen_item:
+                chosen_item.setText(chosen_name)
+            if confidence_item:
+                confidence_item.setText(f"{plan_item.confidence:.2f}")
+            break
+
+    def on_distribution_choice_changed(self, _index: int = 0):
+        chooser = self.sender()
+        if not isinstance(chooser, QComboBox):
+            return
+        row_id = chooser.property("row_id")
+        if not row_id:
+            return
+        plan_item = self.find_distribution_plan_item(str(row_id))
+        if not plan_item:
+            return
+        selected_path = str(chooser.currentData() or "")
+        if selected_path:
+            plan_item.chosen_folder = selected_path
+            if plan_item.decision == "ASK":
+                plan_item.confidence = 1.0
+                plan_item.reason = "User confirmed target folder"
+        else:
+            plan_item.chosen_folder = None
+            if plan_item.decision == "ASK":
+                plan_item.confidence = 0.0
+                if not plan_item.reason:
+                    plan_item.reason = "Awaiting user selection"
+        self.update_distribution_plan_row_display(str(row_id))
+
     def collect_plan_for_apply(self) -> list[DistributionPlanItem]:
-        updated_plan: list[DistributionPlanItem] = []
-        plan = self.distribution_plan_view or self.distribution_plan
-        for row, item in enumerate(plan):
-            chooser = self.distribution_plan_table.cellWidget(row, 4)
-            selected_path = ""
-            if isinstance(chooser, QComboBox):
-                selected_path = str(chooser.currentData() or "")
-            if item.decision == "ASK":
-                chosen_folder = selected_path or None
-            else:
-                chosen_folder = item.chosen_folder
-            updated_plan.append(
-                DistributionPlanItem(
-                    source_pdf=item.source_pdf,
-                    chosen_folder=chosen_folder,
-                    candidates=item.candidates,
-                    decision=item.decision,
-                    confidence=item.confidence,
-                    reason=item.reason,
-                    dest_path=item.dest_path,
-                )
-            )
-        return updated_plan
+        return self.distribution_plan
 
     def on_distribute_clicked(self):
         input_dir = self.distribution_input_edit.text() or self.input_edit.text()
@@ -2564,7 +2612,7 @@ class RenamerGUI(QMainWindow):
             os.path.expanduser("~"), "Renamer", "distribution_audit.log"
         )
         self.distribution_audit_log_path = audit_log_path
-        plan_to_apply = self.collect_plan_for_apply()
+        plan_to_apply = self.distribution_plan
         auto_only = self.auto_apply_checkbox.isChecked()
 
         self.start_distribution_ui(len(plan_to_apply))
