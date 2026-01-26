@@ -36,6 +36,7 @@ class DistributionConfig:
     stopwords: list[str] = None
     unassigned_action: str = "leave"
     unassigned_include_ask: bool = False
+    dest_exists_policy: str = "skip"
 
     def normalized_stopwords(self) -> list[str]:
         if self.stopwords is None:
@@ -356,6 +357,19 @@ class DistributionEngine:
                 doc_token_list = sorted(doc.tokens)
                 doc_pair_list = sorted(doc.person_pairs)
                 pool_size = score_summary.candidate_pool_size
+                if decision == "ASK" and (confidence <= 0.0 or score_summary.best_score <= 0.0):
+                    any_token_overlap = any(
+                        doc.tokens & candidate.folder.tokens for candidate in candidates
+                    )
+                    any_pair_overlap = any(
+                        doc.person_pairs & candidate.folder.person_pairs for candidate in candidates
+                    )
+                    self.log(
+                        "ASK=0 diagnostics: "
+                        f"file={filename} tokens={doc_token_list} pairs={len(doc_pair_list)} "
+                        f"pool={pool_size} any_token_overlap={any_token_overlap} "
+                        f"any_pair_overlap={any_pair_overlap}"
+                    )
                 if candidates:
                     best_candidate = candidates[0]
                     top_pair_overlap = doc.person_pairs & best_candidate.folder.person_pairs
@@ -419,7 +433,11 @@ class DistributionEngine:
 
             if chosen_folder:
                 try:
-                    dest_path, _ = resolve_destination_path(pdf_path, chosen_folder)
+                    dest_path, _ = resolve_destination_path(
+                        pdf_path,
+                        chosen_folder,
+                        exists_policy=self.config.dest_exists_policy,
+                    )
                 except Exception:
                     dest_path = None
 
@@ -453,13 +471,21 @@ class DistributionEngine:
         processed = 0
         copied_count = 0
         skipped_count = 0
+        dest_exists_count = 0
         unmatched_count = 0
         ask_unresolved_count = 0
         for item in plan:
             decision = item.decision
+            unassigned_action = self.config.unassigned_action
+            send_ask = self.config.unassigned_include_ask
+            should_unassign = (
+                decision == "UNMATCHED"
+                or (decision == "ASK" and send_ask and not item.chosen_folder)
+            )
+            allow_unassigned = should_unassign and unassigned_action in ("copy", "move")
             if auto_only and decision not in ("AUTO", "AI") and not (
                 decision == "ASK" and item.chosen_folder
-            ):
+            ) and not allow_unassigned:
                 self._append_audit_log(audit_log_path, item, "SKIPPED (auto_apply_only)")
                 self.log(f"SKIPPED (auto_apply_only) -> {os.path.basename(item.source_pdf)}")
                 skipped_count += 1
@@ -469,12 +495,6 @@ class DistributionEngine:
                 continue
 
             target_folder = item.chosen_folder
-            unassigned_action = self.config.unassigned_action
-            send_ask = self.config.unassigned_include_ask
-            should_unassign = (
-                decision == "UNMATCHED"
-                or (decision == "ASK" and send_ask and not item.chosen_folder)
-            )
             if not target_folder and should_unassign and unassigned_action in ("copy", "move"):
                 target_folder = os.path.join(self.case_root, "UNASSIGNED")
 
@@ -524,17 +544,29 @@ class DistributionEngine:
 
             try:
                 if should_unassign and unassigned_action == "move":
-                    dest_path, result = safe_move(item.source_pdf, target_folder)
+                    dest_path, result = safe_move(
+                        item.source_pdf,
+                        target_folder,
+                        exists_policy=self.config.dest_exists_policy,
+                    )
                 else:
-                    dest_path, result = safe_copy(item.source_pdf, target_folder)
+                    dest_path, result = safe_copy(
+                        item.source_pdf,
+                        target_folder,
+                        exists_policy=self.config.dest_exists_policy,
+                    )
                 item.dest_path = dest_path
                 if result == "SKIPPED":
                     result = "SKIPPED (dest_exists)"
                     skipped_count += 1
+                    dest_exists_count += 1
                 else:
                     copied_count += 1
-                self.log(f"{result} -> {os.path.basename(target_folder)}")
-                self._append_audit_log(audit_log_path, item, result)
+                result_label = result
+                if should_unassign and os.path.basename(target_folder) == "UNASSIGNED":
+                    result_label = f"{result} (unassigned)"
+                self.log(f"{result_label} -> {os.path.basename(target_folder)}")
+                self._append_audit_log(audit_log_path, item, result_label)
             except Exception as exc:
                 self.log(f"FAILED -> {os.path.basename(target_folder)} ({exc})")
                 self._append_audit_log(audit_log_path, item, "FAILED")
@@ -544,7 +576,8 @@ class DistributionEngine:
         self.log(
             "Apply summary: "
             f"COPIED={copied_count} SKIPPED={skipped_count} "
-            f"UNMATCHED={unmatched_count} ASK_UNRESOLVED={ask_unresolved_count}"
+            f"DEST_EXISTS={dest_exists_count} UNMATCHED={unmatched_count} "
+            f"ASK_UNRESOLVED={ask_unresolved_count}"
         )
 
     def _append_audit_log(self, path: str, item: DistributionPlanItem, result: str) -> None:

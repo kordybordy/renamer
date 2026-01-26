@@ -11,13 +11,14 @@ def normalize_polish(text: str) -> str:
         "ć": "c",
         "ę": "e",
         "ł": "l",
+        "Ł": "L",
         "ń": "n",
         "ó": "o",
         "ś": "s",
         "ż": "z",
         "ź": "z",
     })
-    normalized = (text or "").lower()
+    normalized = (text or "").replace("Ł", "L").replace("ł", "l").lower()
     normalized = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     normalized = normalized.translate(mapping)

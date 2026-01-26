@@ -29,7 +29,7 @@ from PyQt6.QtGui import QPixmap, QIcon, QPalette, QColor
 from distribution.engine import DistributionConfig, DistributionEngine
 from distribution.models import DistributionPlanItem
 from distribution.scorer import DEFAULT_STOPWORDS
-from distribution.safety import validate_distribution_paths
+from distribution.safety import resolve_destination_path, validate_distribution_paths
 
 AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
@@ -1496,6 +1496,19 @@ class RenamerGUI(QMainWindow):
         unmatched_col.addWidget(self.distribution_unassigned_ask_checkbox)
         distribution_layout.addLayout(unmatched_col)
 
+        dest_exists_col = QVBoxLayout()
+        dest_exists_col.setSpacing(6)
+        dest_exists_col.addWidget(QLabel("If destination exists:"))
+        self.distribution_dest_exists_combo = QComboBox()
+        self.distribution_dest_exists_combo.addItem("Skip (default)", "skip")
+        self.distribution_dest_exists_combo.addItem("Rename copy", "rename")
+        self.distribution_dest_exists_combo.addItem("Overwrite (danger)", "overwrite")
+        self.distribution_dest_exists_combo.setToolTip(
+            "Skip leaves existing files in place. Rename copy adds a counter. Overwrite replaces files."
+        )
+        dest_exists_col.addWidget(self.distribution_dest_exists_combo)
+        distribution_layout.addLayout(dest_exists_col)
+
         stopwords_col = QVBoxLayout()
         stopwords_col.setSpacing(6)
         stopwords_col.addWidget(QLabel("Stopwords (comma-separated):"))
@@ -1681,6 +1694,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_filter_combo.addItem("AUTO only", "AUTO")
         self.distribution_filter_combo.addItem("AI only", "AI")
         self.distribution_filter_combo.addItem("UNMATCHED only", "UNMATCHED")
+        self.distribution_filter_combo.addItem("Unresolved (ASK+UNMATCHED)", "UNRESOLVED")
         self.distribution_filter_combo.currentIndexChanged.connect(
             self.on_distribution_filter_changed
         )
@@ -1695,6 +1709,14 @@ class RenamerGUI(QMainWindow):
             self.on_distribution_sort_changed
         )
         plan_controls.addWidget(self.distribution_sort_combo)
+        self.distribution_unresolved_workset_button = QPushButton("Create work set from unresolved")
+        self.distribution_unresolved_workset_button.setToolTip(
+            "Copies unresolved files into _unresolved_workset and switches input to that folder."
+        )
+        self.distribution_unresolved_workset_button.clicked.connect(
+            self.on_create_unresolved_workset
+        )
+        plan_controls.addWidget(self.distribution_unresolved_workset_button)
         plan_controls.addStretch()
         plan_layout.addLayout(plan_controls)
         self.distribution_plan_table = QTableWidget(0, 5)
@@ -1829,6 +1851,7 @@ class RenamerGUI(QMainWindow):
         unmatched_policy = self.settings.value("distribution_unmatched_policy", "leave")
         if unmatched_policy == "unmatched_folder":
             unmatched_policy = "copy"
+        dest_exists_policy = self.settings.value("distribution_dest_exists_policy", "skip")
         stopwords = self.settings.value(
             "distribution_stopwords", ", ".join(DEFAULT_STOPWORDS)
         )
@@ -1843,6 +1866,9 @@ class RenamerGUI(QMainWindow):
         unmatched_index = self.distribution_unmatched_combo.findData(str(unmatched_policy))
         if unmatched_index >= 0:
             self.distribution_unmatched_combo.setCurrentIndex(unmatched_index)
+        dest_exists_index = self.distribution_dest_exists_combo.findData(str(dest_exists_policy))
+        if dest_exists_index >= 0:
+            self.distribution_dest_exists_combo.setCurrentIndex(dest_exists_index)
         self.distribution_stopwords_edit.setText(str(stopwords))
         self.allow_home_case_root_checkbox.setChecked(str(allow_home).lower() == "true")
         self.auto_apply_checkbox.setChecked(str(auto_apply).lower() == "true")
@@ -1897,6 +1923,10 @@ class RenamerGUI(QMainWindow):
         self.settings.setValue(
             "distribution_unassigned_include_ask",
             self.distribution_unassigned_ask_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            "distribution_dest_exists_policy",
+            self.distribution_dest_exists_combo.currentData(),
         )
         self.settings.setValue(
             "distribution_stopwords", self.distribution_stopwords_edit.text()
@@ -2292,6 +2322,8 @@ class RenamerGUI(QMainWindow):
             decision = decision_item.text() if decision_item else ""
             if filter_mode == "UNMATCHED":
                 matches = decision in ("UNMATCHED", "SKIP")
+            elif filter_mode == "UNRESOLVED":
+                matches = decision in ("ASK", "UNMATCHED")
             else:
                 matches = filter_mode in ("all", decision)
             self.distribution_plan_table.setRowHidden(row, not matches)
@@ -2307,6 +2339,83 @@ class RenamerGUI(QMainWindow):
         )
         self.update_distribution_plan_table(sorted_plan)
         self.apply_distribution_filter()
+
+    def _get_unresolved_distribution_items(self) -> list[DistributionPlanItem]:
+        return [
+            item
+            for item in self.distribution_plan
+            if item.decision == "UNMATCHED"
+            or (item.decision == "ASK" and not item.chosen_folder)
+        ]
+
+    def on_create_unresolved_workset(self):
+        if not self.distribution_plan:
+            QMessageBox.information(
+                self,
+                "No distribution plan",
+                "Run a dry run first to generate a plan before creating a work set.",
+            )
+            return
+        input_dir = self.distribution_input_edit.text() or self.input_edit.text()
+        if not input_dir or not os.path.isdir(input_dir):
+            show_friendly_error(
+                self,
+                "Invalid input folder",
+                "Renamer could not find the distribution input folder.",
+                input_dir or "No input folder configured.",
+            )
+            return
+        unresolved = self._get_unresolved_distribution_items()
+        if not unresolved:
+            QMessageBox.information(
+                self,
+                "No unresolved files",
+                "All files are resolved. Nothing to add to the work set.",
+            )
+            return
+        workset_dir = os.path.join(input_dir, "_unresolved_workset")
+        try:
+            if os.path.exists(workset_dir):
+                shutil.rmtree(workset_dir)
+            os.makedirs(workset_dir, exist_ok=True)
+        except Exception as exc:
+            show_friendly_error(
+                self,
+                "Work set error",
+                "Renamer could not create the unresolved work set folder.",
+                str(exc),
+            )
+            return
+
+        copied = 0
+        for item in unresolved:
+            try:
+                dest_path, _ = resolve_destination_path(
+                    item.source_pdf, workset_dir, exists_policy="rename"
+                )
+                try:
+                    os.link(item.source_pdf, dest_path)
+                    action = "LINKED"
+                except OSError:
+                    shutil.copy2(item.source_pdf, dest_path)
+                    action = "COPIED"
+                copied += 1
+                self.append_distribution_log_message(
+                    f"{action} -> {os.path.basename(dest_path)}"
+                )
+            except Exception as exc:
+                self.append_distribution_log_message(
+                    f"FAILED -> {os.path.basename(item.source_pdf)} ({exc})"
+                )
+
+        self.distribution_input_edit.setText(workset_dir)
+        unresolved_index = self.distribution_filter_combo.findData("UNRESOLVED")
+        if unresolved_index >= 0:
+            self.distribution_filter_combo.setCurrentIndex(unresolved_index)
+        self.apply_distribution_filter()
+        self.append_distribution_log_message(
+            f"Work set created: {copied}/{len(unresolved)} files in {workset_dir}"
+        )
 
     def build_distribution_config(self) -> DistributionConfig:
         raw_stopwords = self.distribution_stopwords_edit.text()
@@ -2327,6 +2436,7 @@ class RenamerGUI(QMainWindow):
             stopwords=stopwords,
             unassigned_action=str(self.distribution_unmatched_combo.currentData()),
             unassigned_include_ask=self.distribution_unassigned_ask_checkbox.isChecked(),
+            dest_exists_policy=str(self.distribution_dest_exists_combo.currentData()),
         )
 
     def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):

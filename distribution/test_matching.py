@@ -5,6 +5,7 @@ from distribution.scorer import (
     extract_surnames_from_folder,
     extract_tokens,
     normalize_text,
+    strip_folder_suffix,
     score_document,
 )
 from distribution.engine import DistributionConfig, DistributionEngine
@@ -26,13 +27,15 @@ def make_doc(opposing_parties: list[str], filename: str) -> DocumentMeta:
 
 
 def make_folder(name: str) -> FolderMeta:
+    match_name = strip_folder_suffix(name)
     return FolderMeta(
         folder_path=f"/cases/{name}",
         folder_name=name,
-        normalized_name=normalize_text(name),
-        tokens=extract_tokens(name, DEFAULT_STOPWORDS),
-        surnames=extract_surnames_from_folder(name, DEFAULT_STOPWORDS),
-        person_pairs=extract_person_pairs(name, DEFAULT_STOPWORDS),
+        match_name=match_name,
+        normalized_name=normalize_text(match_name),
+        tokens=extract_tokens(match_name, DEFAULT_STOPWORDS),
+        surnames=extract_surnames_from_folder(match_name, DEFAULT_STOPWORDS),
+        person_pairs=extract_person_pairs(match_name, DEFAULT_STOPWORDS),
         case_numbers=set(),
     )
 
@@ -87,6 +90,22 @@ def test_diacritics_fold_matches_ascii_folder() -> None:
     doc = make_doc(["Żmijewska Grażyna"], "Żmijewska Grażyna - Pozew.pdf")
     correct = make_folder("ZMIJEWSKA_GRAZYNA")
     wrong = make_folder("KOWALSKA_GRAZYNA")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_lslash_matches_ascii_folder() -> None:
+    doc = make_doc(["Łukaszewski Jan"], "Łukaszewski Jan - Pozew.pdf")
+    correct = make_folder("LUKASZEWSKI_JAN")
+    wrong = make_folder("KOWALSKI_JAN")
+    summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
+    assert summary.candidates[0].folder.folder_name == correct.folder_name
+
+
+def test_folder_suffix_stripping_keeps_people_pairs() -> None:
+    doc = make_doc(["Zieliński Franciszek"], "Zieliński Franciszek - Pozew.pdf")
+    correct = make_folder("ZIELINSKI_FRANCISZEK XXVIII C 8703_25 (CC25MM)")
+    wrong = make_folder("ZIELINSKI_FRANCISZEK_PAWEL")
     summary = score_document(doc, [wrong, correct], DEFAULT_STOPWORDS, top_k=2)
     assert summary.candidates[0].folder.folder_name == correct.folder_name
 

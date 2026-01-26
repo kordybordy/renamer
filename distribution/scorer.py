@@ -87,6 +87,9 @@ class ScoreSummary:
 
 
 def strip_diacritics(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("Ł", "L").replace("ł", "l")
     normalized = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
@@ -98,6 +101,27 @@ def normalize_text(text: str) -> str:
     cleaned = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+def strip_folder_suffix(name: str) -> str:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return cleaned
+    while True:
+        updated = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated.strip()
+    case_pattern = re.compile(
+        r"\s+(?:[IVXLCDM]{1,8}\s+)?(?:[A-Z]{1,4}\s+)?\d{1,6}(?:[/_-]\d{2,4})\s*$",
+        re.IGNORECASE,
+    )
+    while True:
+        updated = case_pattern.sub("", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated.strip()
+    return cleaned or (name or "")
 
 
 COMMON_FIRST_NAMES = {normalize_text(name) for name in COMMON_FIRST_NAMES_RAW if name}
