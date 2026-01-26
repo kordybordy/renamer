@@ -27,16 +27,18 @@ class DistributionConfig:
     auto_threshold: float = 70.0
     gap_threshold: float = 15.0
     ai_threshold: float = 0.7
+    enable_ai_tiebreaker: bool = False
     top_k: int = 15
     stage2_k: int = 80
     candidate_pool_limit: int = 200
     fast_mode: bool = True
     tie_epsilon: float = 5.0
-    ai_max_candidates: int = 5
+    ai_max_candidates: int = 15
     stopwords: list[str] = None
     unassigned_action: str = "leave"
     unassigned_include_ask: bool = False
     dest_exists_policy: str = "skip"
+    apply_during_planning: bool = False
 
     def normalized_stopwords(self) -> list[str]:
         if self.stopwords is None:
@@ -171,18 +173,25 @@ class DistributionEngine:
         self,
         doc: DocumentMeta,
         candidates: list[MatchCandidate],
-    ) -> tuple[int | None, float, str]:
+    ) -> tuple[str | None, float, str]:
         shortlist = candidates[: self.config.ai_max_candidates]
+        if not shortlist:
+            return None, 0.0, "AI unavailable"
         doc_summary = {
             "opposing_parties": doc.opposing_parties,
             "case_numbers": doc.case_numbers,
             "letter_type": doc.letter_type,
+            "people_tokens": sorted(doc.tokens),
+            "people_pairs": [" ".join(pair) for pair in sorted(doc.person_pairs)],
         }
         candidate_summary = [
             {
                 "folder_name": cand.folder.folder_name,
+                "match_name": cand.folder.match_name,
+                "people_tokens": sorted(cand.folder.tokens),
+                "people_pairs": [" ".join(pair) for pair in sorted(cand.folder.person_pairs)],
+                "case_numbers": sorted(cand.folder.case_numbers),
                 "score": cand.score,
-                "reason": "; ".join(cand.reasons[:2]),
             }
             for cand in shortlist
         ]
@@ -198,19 +207,56 @@ class DistributionEngine:
                 provider=provider,
             )
             if result is None:
+                logging.getLogger(__name__).debug(
+                    "AI tiebreaker failed to return JSON (provider=%s)", provider
+                )
                 continue
-            best_index = result.get("best_index")
+            chosen_folder = str(result.get("chosen_folder") or "").strip()
             confidence = float(result.get("confidence") or 0.0)
             reason = str(result.get("reason") or "").strip()
-            if best_index is None:
+            if not chosen_folder:
                 return None, confidence, reason or "AI declined to choose"
-            if not isinstance(best_index, int):
-                return None, confidence, "AI returned invalid index"
-            if best_index < 0 or best_index >= len(shortlist):
-                return None, confidence, "AI index out of range"
-            return best_index, confidence, reason or "AI tie-breaker"
+            match = next(
+                (
+                    cand
+                    for cand in shortlist
+                    if cand.folder.folder_name == chosen_folder
+                ),
+                None,
+            )
+            if not match:
+                logger = logging.getLogger(__name__)
+                logger.debug(
+                    "AI tiebreaker returned unknown folder: %s (provider=%s)",
+                    chosen_folder,
+                    provider,
+                )
+                return None, confidence, "AI returned unknown folder"
+            return match.folder.folder_path, confidence, reason or "AI tie-breaker"
 
         return None, 0.0, "AI unavailable"
+
+    def _is_ambiguous(self, score_summary: ScoreSummary, doc: DocumentMeta) -> bool:
+        if not score_summary.candidates:
+            return False
+        best = score_summary.best_score
+        second = score_summary.second_score
+        min_score = max(20.0, self.config.auto_threshold * 0.5)
+        if best < min_score:
+            return False
+        gap = best - second
+        if gap < self.config.gap_threshold or abs(gap) <= self.config.tie_epsilon:
+            return True
+        top = score_summary.candidates[:3]
+        if len(top) >= 2 and doc.person_pairs:
+            overlaps = [
+                len(doc.person_pairs & candidate.folder.person_pairs)
+                for candidate in top
+            ]
+            overlaps_sorted = sorted(overlaps, reverse=True)
+            if overlaps_sorted[0] > 0 and overlaps_sorted[0] - overlaps_sorted[1] <= 1:
+                return True
+        return False
 
     def _decision_for_score(self, score_summary: ScoreSummary) -> tuple[bool, bool]:
         best = score_summary.best_score
@@ -224,11 +270,14 @@ class DistributionEngine:
         pdf_files: list[str],
         *,
         progress_cb: Callable[[int, int, str], None] | None = None,
+        audit_log_path: str | None = None,
     ) -> list[DistributionPlanItem]:
         folder_index = self.build_index()
         plan: list[DistributionPlanItem] = []
         total = len(pdf_files)
         processed = 0
+        if audit_log_path:
+            os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
         stopwords = self.config.normalized_stopwords()
         for filename in pdf_files:
             pdf_path = os.path.join(self.input_folder, filename)
@@ -267,6 +316,7 @@ class DistributionEngine:
             reason = "No candidates"
             chosen_folder: str | None = None
             dest_path: str | None = None
+            result: str | None = None
 
             if candidates:
                 auto, tie = self._decision_for_score(score_summary)
@@ -325,33 +375,58 @@ class DistributionEngine:
                     confidence = min(1.0, best.score / 100.0)
                     reason = "High confidence deterministic match"
                     chosen_folder = best.folder.folder_path
-                elif force_ask:
-                    decision = "ASK"
-                    confidence = 0.0
-                    reason = "Ambiguous match; needs confirmation"
                 else:
-                    if not auto and auto_block_reason:
-                        self.log(
-                            f"Auto-accept blocked: {auto_block_reason} "
-                            f"(score={score_summary.best_score:.1f}, gap={score_summary.best_score - score_summary.second_score:.1f})"
+                    if force_ask:
+                        decision = "ASK"
+                        confidence = 0.0
+                        reason = "Ambiguous match; needs confirmation"
+                    else:
+                        if not auto and auto_block_reason:
+                            self.log(
+                                f"Auto-accept blocked: {auto_block_reason} "
+                                f"(score={score_summary.best_score:.1f}, gap={score_summary.best_score - score_summary.second_score:.1f})"
+                            )
+                        if score_summary.best_score < self.config.auto_threshold:
+                            auto_block_reason = "low score"
+                        elif score_summary.best_score - score_summary.second_score < self.config.gap_threshold:
+                            auto_block_reason = "low gap"
+                        decision = "ASK"
+                        confidence = 0.0
+                        reason = "Ambiguous match; needs confirmation"
+                    ai_chosen, ai_confidence, ai_reason = (None, 0.0, "")
+                    attempted_ai = False
+                    if self.config.enable_ai_tiebreaker and self._is_ambiguous(score_summary, doc):
+                        attempted_ai = True
+                        ai_chosen, ai_confidence, ai_reason = self._ai_tiebreak(
+                            doc, candidates
                         )
-                    if score_summary.best_score < self.config.auto_threshold:
-                        auto_block_reason = "low score"
-                    elif score_summary.best_score - score_summary.second_score < self.config.gap_threshold:
-                        auto_block_reason = "low gap"
-                    best_index, ai_confidence, ai_reason = self._ai_tiebreak(doc, candidates)
-                    if best_index is not None and ai_confidence >= self.config.ai_threshold:
+                    if ai_chosen and ai_confidence >= self.config.ai_threshold:
                         decision = "AI"
                         confidence = ai_confidence
                         reason = ai_reason or "AI tie-breaker"
-                        chosen_folder = candidates[best_index].folder.folder_path
+                        chosen_folder = ai_chosen
                         self.log(
-                            f"AI picked folder #{best_index + 1} confidence={ai_confidence:.2f}"
+                            "AI_TIEBREAK used: "
+                            f"src={filename} candidates={min(len(candidates), self.config.ai_max_candidates)} "
+                            f"chosen={os.path.basename(ai_chosen)} conf={ai_confidence:.2f}"
                         )
-                    else:
+                    elif ai_chosen:
                         decision = "ASK"
                         confidence = ai_confidence
-                        reason = ai_reason or "Ambiguous match; needs confirmation"
+                        reason = ai_reason or "AI suggestion (low confidence)"
+                        chosen_folder = ai_chosen
+                        self.log(
+                            "AI_TIEBREAK used: "
+                            f"src={filename} candidates={min(len(candidates), self.config.ai_max_candidates)} "
+                            f"chosen={os.path.basename(ai_chosen)} conf={ai_confidence:.2f} (below threshold)"
+                        )
+                    else:
+                        if attempted_ai and ai_reason:
+                            logging.getLogger(__name__).debug(
+                                "AI tiebreaker skipped: %s (file=%s)", ai_reason, filename
+                            )
+                            if ai_reason == "AI unavailable":
+                                self.log(f"AI unavailable for {filename}")
 
             if decision in ("ASK", "UNMATCHED"):
                 doc_token_list = sorted(doc.tokens)
@@ -440,6 +515,24 @@ class DistributionEngine:
                     )
                 except Exception:
                     dest_path = None
+            if (
+                self.config.apply_during_planning
+                and decision == "AUTO"
+                and chosen_folder
+                and audit_log_path
+            ):
+                result, applied_dest = self._apply_during_planning(
+                    pdf_path,
+                    chosen_folder,
+                    audit_log_path,
+                    dest_path,
+                    decision,
+                    confidence,
+                    reason,
+                    candidates,
+                )
+                if applied_dest:
+                    dest_path = applied_dest
 
             plan.append(
                 DistributionPlanItem(
@@ -450,6 +543,7 @@ class DistributionEngine:
                     confidence=confidence,
                     reason=reason,
                     dest_path=dest_path,
+                    result=result,
                 )
             )
             processed += 1
@@ -457,6 +551,79 @@ class DistributionEngine:
                 progress_cb(processed, total, f"Planned {processed}/{total}")
 
         return plan
+
+    def _apply_during_planning(
+        self,
+        source_pdf: str,
+        chosen_folder: str,
+        audit_log_path: str,
+        dest_path: str | None,
+        decision: str,
+        confidence: float,
+        reason: str,
+        candidates: list[MatchCandidate],
+    ) -> tuple[str, str | None]:
+        case_root_abs = os.path.abspath(self.case_root)
+        target_abs = os.path.abspath(chosen_folder)
+        if os.path.commonpath([case_root_abs, target_abs]) != case_root_abs:
+            result = "SKIPPED (safety_guard)"
+            self.log(f"{result} -> {os.path.basename(source_pdf)}")
+            self._append_audit_log(
+                audit_log_path,
+                DistributionPlanItem(
+                    source_pdf=source_pdf,
+                    chosen_folder=chosen_folder,
+                    candidates=candidates,
+                    decision=decision,
+                    confidence=confidence,
+                    reason=reason,
+                    dest_path=dest_path,
+                ),
+                result,
+            )
+            return result, dest_path
+        try:
+            dest_path, copy_result = safe_copy(
+                source_pdf,
+                chosen_folder,
+                exists_policy=self.config.dest_exists_policy,
+            )
+            if copy_result == "SKIPPED":
+                result = "SKIPPED (dest_exists)"
+            else:
+                result = "COPIED (planning)"
+            self.log(f"{result} -> {os.path.basename(chosen_folder)}")
+            self._append_audit_log(
+                audit_log_path,
+                DistributionPlanItem(
+                    source_pdf=source_pdf,
+                    chosen_folder=chosen_folder,
+                    candidates=candidates,
+                    decision=decision,
+                    confidence=confidence,
+                    reason=reason,
+                    dest_path=dest_path,
+                ),
+                result,
+            )
+            return result, dest_path
+        except Exception as exc:
+            result = f"FAILED ({exc})"
+            self.log(f"{result} -> {os.path.basename(chosen_folder)}")
+            self._append_audit_log(
+                audit_log_path,
+                DistributionPlanItem(
+                    source_pdf=source_pdf,
+                    chosen_folder=chosen_folder,
+                    candidates=candidates,
+                    decision=decision,
+                    confidence=confidence,
+                    reason=reason,
+                    dest_path=dest_path,
+                ),
+                "FAILED",
+            )
+            return "FAILED", dest_path
 
     def apply_plan(
         self,
@@ -475,6 +642,19 @@ class DistributionEngine:
         unmatched_count = 0
         ask_unresolved_count = 0
         for item in plan:
+            if item.result and (
+                item.result.startswith("COPIED")
+                or item.result.startswith("SKIPPED (dest_exists)")
+            ):
+                self._append_audit_log(audit_log_path, item, "SKIPPED (already_applied)")
+                self.log(
+                    f"SKIPPED (already_applied) -> {os.path.basename(item.source_pdf)}"
+                )
+                skipped_count += 1
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total, f"Applied {processed}/{total}")
+                continue
             decision = item.decision
             unassigned_action = self.config.unassigned_action
             send_ask = self.config.unassigned_include_ask

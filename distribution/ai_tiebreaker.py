@@ -78,16 +78,16 @@ def _call_ollama(prompt: str) -> str:
 
 def build_prompt(doc: dict, candidates: list[dict]) -> str:
     return (
-        "Pick the best matching folder index based on opposing parties and case numbers.\n"
+        "Pick the best matching folder based on opposing parties and case numbers.\n"
         "Return strict JSON in this exact shape:\n"
         "{\n"
-        "  \"best_index\": 0 | 1 | 2 | null,\n"
+        "  \"chosen_folder\": \"<folder_name from candidates>\" | null,\n"
         "  \"confidence\": 0.0-1.0,\n"
         "  \"reason\": \"short\"\n"
         "}\n"
         "Rules:\n"
         "- Only choose from the provided candidates list.\n"
-        "- If none are plausible, best_index must be null.\n"
+        "- If none are plausible, chosen_folder must be null.\n"
         "- Keep reason short.\n\n"
         f"DOC={json.dumps(doc, ensure_ascii=False)}\n"
         f"CANDIDATES={json.dumps(candidates, ensure_ascii=False)}"
@@ -113,6 +113,6 @@ def choose_best_candidate(
     parsed = _parse_json_content(response_text)
     if not parsed:
         return None
-    if "best_index" not in parsed:
+    if "chosen_folder" not in parsed:
         return None
     return parsed
