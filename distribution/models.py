@@ -26,6 +26,7 @@ class DocumentMeta:
 class FolderMeta:
     folder_path: str
     folder_name: str
+    match_name: str
     normalized_name: str
     tokens: set[str] = field(default_factory=set)
     surnames: set[str] = field(default_factory=set)

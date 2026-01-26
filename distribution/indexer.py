@@ -10,6 +10,7 @@ from .scorer import (
     extract_tokens,
     normalize_text,
     normalize_stopwords,
+    strip_folder_suffix,
 )
 
 
@@ -22,13 +23,15 @@ def build_folder_index(case_root: str, stopwords: Iterable[str]) -> FolderIndex:
         full_path = os.path.join(case_root, name)
         if not os.path.isdir(full_path):
             continue
-        normalized = normalize_text(name)
-        tokens = extract_tokens(name, blocked)
-        surnames = extract_surnames_from_folder(name, blocked)
-        person_pairs = extract_person_pairs(name, blocked)
+        match_name = strip_folder_suffix(name)
+        normalized = normalize_text(match_name)
+        tokens = extract_tokens(match_name, blocked)
+        surnames = extract_surnames_from_folder(match_name, blocked)
+        person_pairs = extract_person_pairs(match_name, blocked)
         folder_meta = FolderMeta(
             folder_path=full_path,
             folder_name=name,
+            match_name=match_name,
             normalized_name=normalized,
             tokens=tokens,
             surnames=surnames,

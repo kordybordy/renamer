@@ -69,7 +69,12 @@ def _file_hash(path: str) -> str:
     return digest.hexdigest()
 
 
-def resolve_destination_path(source_path: str, destination_dir: str) -> tuple[str, str]:
+def resolve_destination_path(
+    source_path: str,
+    destination_dir: str,
+    *,
+    exists_policy: str = "rename",
+) -> tuple[str, str]:
     if not os.path.isfile(source_path):
         raise FileNotFoundError(f"Source file not found: {source_path}")
 
@@ -84,6 +89,10 @@ def resolve_destination_path(source_path: str, destination_dir: str) -> tuple[st
         dest_path = os.path.join(destination_dir, candidate)
         if not os.path.exists(dest_path):
             return dest_path, "planned"
+        if exists_policy == "skip":
+            return dest_path, "skip_existing"
+        if exists_policy == "overwrite":
+            return dest_path, "overwrite"
         if os.path.getsize(dest_path) == os.path.getsize(source_path):
             try:
                 if _file_hash(dest_path) == _file_hash(source_path):
@@ -94,25 +103,41 @@ def resolve_destination_path(source_path: str, destination_dir: str) -> tuple[st
         counter += 1
 
 
-def safe_copy(source_path: str, destination_dir: str) -> tuple[str, str]:
-    dest_path, status = resolve_destination_path(source_path, destination_dir)
+def safe_copy(
+    source_path: str, destination_dir: str, *, exists_policy: str = "rename"
+) -> tuple[str, str]:
+    dest_path, status = resolve_destination_path(
+        source_path, destination_dir, exists_policy=exists_policy
+    )
     if status == "skip_existing":
         return dest_path, "SKIPPED"
+    if status == "overwrite" and os.path.exists(dest_path):
+        if os.path.abspath(source_path) == os.path.abspath(dest_path):
+            raise ValueError("Destination cannot equal source.")
+        os.remove(dest_path)
 
     if os.path.abspath(source_path) == os.path.abspath(dest_path):
         raise ValueError("Destination cannot equal source.")
 
     shutil.copy2(source_path, dest_path)
-    return dest_path, "COPIED"
+    return dest_path, "OVERWROTE" if status == "overwrite" else "COPIED"
 
 
-def safe_move(source_path: str, destination_dir: str) -> tuple[str, str]:
-    dest_path, status = resolve_destination_path(source_path, destination_dir)
+def safe_move(
+    source_path: str, destination_dir: str, *, exists_policy: str = "rename"
+) -> tuple[str, str]:
+    dest_path, status = resolve_destination_path(
+        source_path, destination_dir, exists_policy=exists_policy
+    )
     if status == "skip_existing":
         return dest_path, "SKIPPED"
+    if status == "overwrite" and os.path.exists(dest_path):
+        if os.path.abspath(source_path) == os.path.abspath(dest_path):
+            raise ValueError("Destination cannot equal source.")
+        os.remove(dest_path)
 
     if os.path.abspath(source_path) == os.path.abspath(dest_path):
         raise ValueError("Destination cannot equal source.")
 
     shutil.move(source_path, dest_path)
-    return dest_path, "MOVED"
+    return dest_path, "OVERWROTE" if status == "overwrite" else "MOVED"
