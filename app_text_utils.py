@@ -137,7 +137,10 @@ def format_party_name(name: str, surname_first: bool) -> str:
 
 def normalize_target_filename(name: str) -> str:
     name = name.strip()
-    name = re.sub(r"[\\\\/:*?\"<>|]", "_", name)
+    if FILENAME_RULES.get("replace_slash_only", False):
+        name = name.replace("/", "_")
+    else:
+        name = re.sub(r"[\\\\/:*?\"<>|]", "_", name)
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     return name
@@ -151,6 +154,9 @@ def requirements_from_template(template: list[str], custom_elements: dict[str, s
         "date": True if "date" in template else False,
         "case_number": True if "case_number" in template else False,
     }
+    for element in template:
+        if element not in requirements:
+            requirements[element] = True
     if custom_elements:
         for key in custom_elements:
             requirements[key] = True
@@ -171,7 +177,7 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("case_number", "Case-Number")
     for key in requirements:
         if key not in ("plaintiff", "defendant", "letter_type", "date", "case_number"):
-            meta.setdefault(key, key.replace("_", " ").title())
+            meta.setdefault(key, f"[MISSING:{key}]")
     return meta
 
 

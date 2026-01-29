@@ -134,7 +134,10 @@ def format_party_name(name: str, surname_first: bool) -> str:
 
 def normalize_target_filename(name: str) -> str:
     name = name.strip()
-    name = re.sub(r"[\\\\/:*?\"<>|]", "_", name)
+    if FILENAME_RULES.get("replace_slash_only", False):
+        name = name.replace("/", "_")
+    else:
+        name = re.sub(r"[\\\\/:*?\"<>|]", "_", name)
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     return name
@@ -167,12 +170,16 @@ def apply_party_order(meta: dict, *, plaintiff_surname_first: bool, defendant_su
 
 
 def requirements_from_template(template: list[str]) -> dict:
-    return {
+    requirements = {
         "plaintiff": True if "plaintiff" in template else False,
         "defendant": True if "defendant" in template else False,
         "letter_type": True if "letter_type" in template else False,
         "date": True if "date" in template else False,
     }
+    for element in template:
+        if element not in requirements:
+            requirements[element] = True
+    return requirements
 
 
 def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
@@ -185,6 +192,9 @@ def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
         meta.setdefault("plaintiff", "Plaintiff")
     if requirements.get("defendant"):
         meta.setdefault("defendant", "Defendant")
+    for key in requirements:
+        if key not in ("plaintiff", "defendant", "letter_type", "date"):
+            meta.setdefault(key, f"[MISSING:{key}]")
     return meta
 
 

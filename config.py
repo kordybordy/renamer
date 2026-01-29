@@ -25,6 +25,7 @@ FILENAME_RULES = {
 DEFAULT_TEMPLATE_ELEMENTS = ["date", "plaintiff", "defendant", "letter_type"]
 
 SYSTEM_PROMPT = """
+Return JSON only, no markdown, no commentary.
 Return strict JSON in this exact shape:
 
 {
@@ -34,10 +35,12 @@ Return strict JSON in this exact shape:
   "letter_type": "Pozew" | "Pozew + Postanowienie" |
                  "Postanowienie" | "Portal" | "Korespondencja" |
                  "Unknown" | "Zawiadomienie" |
-                 "Odpowiedź na pozew" | "Wniosek" | "Replika"
+                 "Odpowiedź na pozew" | "Wniosek" | "Replika",
+  "custom": {}
 }
 
 Rules:
+- letter_type MUST be one of the allowed values above.
 - Ignore DWF Poland Jamka and Raiffeisen Bank (do not include them in any party list).
 - Each list item MUST be EXACTLY TWO WORDS: "Given Surname".
   If the person has multiple given names, KEEP ONLY THE FIRST given name.
@@ -46,8 +49,10 @@ Rules:
     "Katarzyna Magdalena Obałek" -> "Katarzyna Obałek"
 - Never include PESEL, addresses, or IDs.
 - Extract ALL case numbers.
+- Do NOT invent placeholders like "Defendant S Surname Name".
 - Preserve Polish letters.
-- No commentary. Output JSON only.
+- If custom fields are provided, populate them under "custom".
+- If no custom fields are provided, return "custom": {}.
 """
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_error.log")
