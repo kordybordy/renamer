@@ -235,6 +235,7 @@ class DistributionEngine:
                 return None, confidence, "AI returned unknown folder"
             return match.folder.folder_path, confidence, reason or "AI tie-breaker"
 
+        self.log("[AI][WARN] Tiebreaker unavailable; check AI configuration or logs.")
         return None, 0.0, "AI unavailable"
 
     def _is_ambiguous(self, score_summary: ScoreSummary, doc: DocumentMeta) -> bool:
@@ -587,11 +588,13 @@ class DistributionEngine:
             )
             return result, dest_path
         try:
+            cleanup_target: str | None = None
             dest_path, copy_result = safe_copy(
                 source_pdf,
                 chosen_folder,
                 exists_policy=self.config.dest_exists_policy,
             )
+            cleanup_target = dest_path
             if copy_result == "SKIPPED":
                 result = "SKIPPED (dest_exists)"
             else:
@@ -613,7 +616,21 @@ class DistributionEngine:
             return result, dest_path
         except Exception as exc:
             result = f"FAILED ({exc})"
-            self.log(f"{result} -> {os.path.basename(chosen_folder)}")
+            if cleanup_target and os.path.exists(cleanup_target):
+                try:
+                    os.remove(cleanup_target)
+                    self.log(
+                        f"[WARN] Removed incomplete file -> {os.path.basename(cleanup_target)}"
+                    )
+                except Exception as cleanup_exc:
+                    logging.getLogger(__name__).exception(
+                        "Failed to remove incomplete file %s: %s",
+                        cleanup_target,
+                        cleanup_exc,
+                    )
+            self.log(
+                f"{result} -> {os.path.basename(source_pdf)} -> {os.path.basename(chosen_folder)}"
+            )
             self._append_audit_log(
                 audit_log_path,
                 DistributionPlanItem(
@@ -729,6 +746,7 @@ class DistributionEngine:
                     progress_cb(processed, total, f"Applied {processed}/{total}")
                 continue
 
+            dest_path = None
             try:
                 if should_unassign and unassigned_action == "move":
                     dest_path, result = safe_move(
@@ -755,7 +773,21 @@ class DistributionEngine:
                 self.log(f"{result_label} -> {os.path.basename(target_folder)}")
                 self._append_audit_log(audit_log_path, item, result_label)
             except Exception as exc:
-                self.log(f"FAILED -> {os.path.basename(target_folder)} ({exc})")
+                if dest_path and os.path.exists(dest_path):
+                    try:
+                        os.remove(dest_path)
+                        self.log(
+                            f"[WARN] Removed incomplete file -> {os.path.basename(dest_path)}"
+                        )
+                    except Exception as cleanup_exc:
+                        logging.getLogger(__name__).exception(
+                            "Failed to remove incomplete file %s: %s",
+                            dest_path,
+                            cleanup_exc,
+                        )
+                self.log(
+                    f"FAILED -> {os.path.basename(item.source_pdf)} -> {os.path.basename(target_folder)} ({exc})"
+                )
                 self._append_audit_log(audit_log_path, item, "FAILED")
             processed += 1
             if progress_cb:
