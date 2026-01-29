@@ -2387,6 +2387,12 @@ class RenamerGUI(QMainWindow):
             )
 
         raw_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode) or {}
+        self.log_activity(
+            "[AI] JSON parsed: "
+            f"defendant={raw_meta.get('defendant')}, "
+            f"plaintiff={raw_meta.get('plaintiff')}, "
+            f"letter_type={raw_meta.get('letter_type')}"
+        )
         if not raw_meta.get("defendant"):
             fallback_defendant = defendant_from_filename(pdf)
             if fallback_defendant:
@@ -2403,6 +2409,14 @@ class RenamerGUI(QMainWindow):
             self.log_activity(
                 f"[UI] Applied defaults for missing fields: {', '.join(defaults_applied)}"
             )
+            missing_custom = [
+                key for key in defaults_applied
+                if key not in ("plaintiff", "defendant", "letter_type", "date", "case_number")
+            ]
+            if missing_custom:
+                self.log_activity(
+                    f"[WARN] Missing custom element values: {', '.join(missing_custom)}"
+                )
         self.log_activity(f"[UI] Extracted meta: {json.dumps(meta, ensure_ascii=False)}")
 
         filename = build_filename(meta, options.template_elements)

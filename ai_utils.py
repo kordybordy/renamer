@@ -57,6 +57,16 @@ def call_ollama_model(text: str) -> str:
         return ""
 
 
+def extract_json_object(text: str) -> dict:
+    raw = (text or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found in response.")
+    snippet = raw[start : end + 1]
+    return json.loads(snippet)
+
+
 def parse_json_content(content: str, source: str) -> dict:
     raw = (content or "").strip()
 
@@ -72,10 +82,10 @@ def parse_json_content(content: str, source: str) -> dict:
 
     parsed = attempt_parse(raw)
     if parsed is None:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            parsed = attempt_parse(raw[start : end + 1])
+        try:
+            parsed = extract_json_object(raw)
+        except Exception:
+            parsed = None
 
     if parsed is None:
         snippet = raw[:120]
@@ -89,7 +99,8 @@ def parse_json_content(content: str, source: str) -> dict:
 def parse_ai_metadata(raw: str) -> dict:
     try:
         data = parse_json_content(raw, "AI response")
-    except Exception:
+    except Exception as e:
+        log_info(f"[AI] JSON parse failed: {e}. Raw response: {raw[:500]}")
         return {}
 
     meta: Dict[str, str] = {}

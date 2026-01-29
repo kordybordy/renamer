@@ -11,19 +11,18 @@ from app_text_utils import clean_party_name, normalize_person_to_given_surname
 def build_system_prompt(custom_elements: dict[str, str]) -> str:
     extras = ""
     if custom_elements:
-        extra_lines = [f'"{name}": "string"' for name in custom_elements]
-        extras = ",\n  " + ",\n  ".join(extra_lines)
+        extra_lines = [f'    "{name}": "string"' for name in custom_elements]
+        extras = '"custom": {\n' + ",\n".join(extra_lines) + "\n  }"
         details = "\n".join(
             [f'- {name}: {desc or "Return a concise string"}' for name, desc in custom_elements.items()]
         )
-        guidance = f"\nCustom fields to add (as strings):\n{details}\n"
+        guidance = f"\nCustom fields to add under \"custom\" (as strings):\n{details}\n"
     else:
         guidance = ""
-    return BASE_SYSTEM_PROMPT.replace(
-        "}",
-        f'{extras}\n}}',
-        1,
-    ) + guidance
+    prompt = BASE_SYSTEM_PROMPT
+    if extras:
+        prompt = prompt.replace('"custom": {}', extras, 1)
+    return prompt + guidance
 
 
 def call_openai_model(text: str, prompt: str) -> str:
@@ -55,6 +54,16 @@ def call_ollama_model(text: str, prompt: str) -> str:
         return ""
 
 
+def extract_json_object(text: str) -> dict:
+    raw = (text or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found in response.")
+    snippet = raw[start : end + 1]
+    return json.loads(snippet)
+
+
 def parse_json_content(content: str, source: str) -> dict:
     """Parse JSON content from AI responses, stripping code fences if present."""
 
@@ -72,10 +81,10 @@ def parse_json_content(content: str, source: str) -> dict:
 
     parsed = attempt_parse(raw)
     if parsed is None:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            parsed = attempt_parse(raw[start : end + 1])
+        try:
+            parsed = extract_json_object(raw)
+        except Exception:
+            parsed = None
 
     if parsed is None:
         snippet = raw[:120]
@@ -90,7 +99,8 @@ def parse_ai_metadata(raw: str, custom_keys: list[str]) -> dict:
 
     try:
         data = parse_json_content(raw, "AI response")
-    except Exception:
+    except Exception as e:
+        log_info(f"[AI] JSON parse failed: {e}. Raw response: {raw[:500]}")
         return {}
 
     meta: dict[str, str] = {}
@@ -132,8 +142,11 @@ def parse_ai_metadata(raw: str, custom_keys: list[str]) -> dict:
         if first_case:
             meta["case_number"] = first_case.strip()
 
+    custom_payload = data.get("custom", {}) if isinstance(data.get("custom"), dict) else {}
     for key in custom_keys:
-        val = data.get(key)
+        val = custom_payload.get(key)
+        if not val:
+            val = data.get(key)
         if isinstance(val, str) and val.strip():
             meta[key] = val.strip()
 
