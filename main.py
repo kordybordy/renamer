@@ -1,19 +1,11 @@
+import json
 import os
 import re
-import json
-import shutil
-import subprocess
-import tempfile
-import glob
+import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
-from urllib.parse import urljoin
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List
-
-from PIL import Image
-import pytesseract
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QLineEdit,
@@ -31,301 +23,22 @@ from distribution.models import DistributionPlanItem
 from distribution.scorer import DEFAULT_STOPWORDS
 from distribution.safety import resolve_destination_path, validate_distribution_paths
 
-AI_BACKEND = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", urljoin(OLLAMA_HOST, "api/generate"))
-
-from openai import OpenAI
-
-API_KEY = os.environ.get("OPENAI_API_KEY", "")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
-
-# ===============================
-# FILENAME POLICY
-# ===============================
-
-FILENAME_RULES = {
-    "remove_raiffeisen": True,        # always remove Raiffeisen from parties
-    "max_parties": 10,                # limit number of names in filename
-    "primary_party_only": False,      # include all detected parties per side
-    "surname_first": True,            # SURNAME Name
-    "use_commas": True,               # comma-separated parties
-    "replace_slash_only": True,       # only replace "/" → "_"
-    "force_letter_type": True,        # GUI overrides AI letter type
-    "default_letter_type": "pozew",   # fallback if AI unsure
-}
-
-
-DEFAULT_TEMPLATE_ELEMENTS = ["date", "plaintiff", "defendant", "letter_type"]
-
-
-# ===============================
-# Logging
-# ===============================
-import traceback
-from datetime import datetime
-
-LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_error.log")
-DISTRIBUTION_LOG_FILE = os.path.join(os.path.expanduser("~"), "renamer_distribution.log")
-
-ACCENT_COLOR = "#4F7CFF"
-BACKGROUND_COLOR = "#1E1E1E"
-PANEL_COLOR = "#252526"
-TEXT_PRIMARY = "#FFFFFF"
-TEXT_SECONDARY = "#B0B0B0"
-BORDER_COLOR = "#333333"
-
-GLOBAL_STYLESHEET = f"""
-* {{
-    font-family: 'Segoe UI', sans-serif;
-    color: {TEXT_PRIMARY};
-}}
-
-QWidget {{
-    background-color: {BACKGROUND_COLOR};
-}}
-
-QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QSpinBox {{
-    background-color: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-radius: 6px;
-    padding: 6px;
-    color: {TEXT_PRIMARY};
-}}
-
-QLabel {{
-    color: {TEXT_PRIMARY};
-}}
-
-QTabWidget::pane {{
-    border: 1px solid {BORDER_COLOR};
-    background: {PANEL_COLOR};
-    border-radius: 10px;
-    padding: 6px;
-}}
-
-QTabBar::tab {{
-    background: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-bottom: none;
-    padding: 8px 16px;
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
-    margin-right: 4px;
-}}
-
-QTabBar::tab:selected {{
-    background: {ACCENT_COLOR};
-    color: {TEXT_PRIMARY};
-}}
-
-QTabBar::tab:hover {{
-    border-color: {ACCENT_COLOR};
-}}
-
-QPushButton {{
-    background-color: {ACCENT_COLOR};
-    border: 1px solid {ACCENT_COLOR};
-    color: {TEXT_PRIMARY};
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-weight: 600;
-}}
-
-QPushButton:hover {{
-    box-shadow: 0 0 8px {ACCENT_COLOR};
-}}
-
-QPushButton:disabled {{
-    background-color: {BORDER_COLOR};
-    border-color: {BORDER_COLOR};
-    color: {TEXT_SECONDARY};
-}}
-
-QProgressBar {{
-    background: {PANEL_COLOR};
-    border: 1px solid {BORDER_COLOR};
-    border-radius: 6px;
-    text-align: center;
-}}
-
-QProgressBar::chunk {{
-    background-color: {ACCENT_COLOR};
-    border-radius: 6px;
-}}
-"""
-
-def log_exception(e: Exception):
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write("\n" + "=" * 60 + "\n")
-        f.write(datetime.now().isoformat() + "\n")
-        f.write(str(e) + "\n")
-        f.write(traceback.format_exc())
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def log_info(message: str):
-    entry = f"{datetime.now().isoformat()} INFO {message}"
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(entry + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-    print(entry)
-
-
-def append_distribution_log(entry: str):
-    with open(DISTRIBUTION_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(entry + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def show_friendly_error(
-    parent: QWidget,
-    title: str,
-    friendly: str,
-    details: str,
-    *,
-    icon: QMessageBox.Icon = QMessageBox.Icon.Critical,
-):
-    box = QMessageBox(parent)
-    box.setWindowTitle(title)
-    box.setText(friendly)
-    if details:
-        box.setInformativeText("Show technical details below if you need them.")
-        box.setDetailedText(details)
-    box.setIcon(icon)
-    box.exec()
-
-
-# ===============================
-# Normalization helpers
-# ===============================
-
-def normalize_polish(text: str) -> str:
-    mapping = str.maketrans({
-        "ą": "a",
-        "ć": "c",
-        "ę": "e",
-        "ł": "l",
-        "ń": "n",
-        "ó": "o",
-        "ś": "s",
-        "ż": "z",
-        "ź": "z",
-    })
-    normalized = (text or "").lower()
-    normalized = re.sub(r"[\-_,.;:()\[\]{}<>!?/\\]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    normalized = normalized.translate(mapping)
-    return normalized
-
-# ===============================
-# BASE DIR
-# ===============================
-if getattr(sys, "frozen", False):
-    BASE_DIR = sys._MEIPASS
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def load_stylesheet() -> str:
-    retro_path = os.path.join(BASE_DIR, "retro.qss")
-    if os.path.exists(retro_path):
-        try:
-            with open(retro_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            log_exception(e)
-    return GLOBAL_STYLESHEET
-
-# ===============================
-# POPPLER (GLOBAL!)
-# ===============================
-POPPLER_PATH = os.path.join(BASE_DIR, "poppler", "Library", "bin")
-PDFTOPPM_EXE = os.path.join(POPPLER_PATH, "pdftoppm.exe")
-os.environ["PATH"] = POPPLER_PATH + os.pathsep + os.environ.get("PATH", "")
-
-if not os.path.exists(PDFTOPPM_EXE):
-    raise RuntimeError(f"pdftoppm.exe not found: {PDFTOPPM_EXE}")
-
-# ===============================
-# Tesseract configuration (CRITICAL)
-# ===============================
-
-def configure_tesseract() -> str:
-    import sys, os, pytesseract
-
-    if getattr(sys, "frozen", False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-    tesseract_dir = os.path.join(base_path, "tesseract")
-    tessdata_dir = os.path.join(tesseract_dir, "tessdata")
-    tesseract_exe = os.path.join(tesseract_dir, "tesseract.exe")
-
-    if not os.path.exists(tesseract_exe):
-        raise RuntimeError(f"Tesseract EXE not found: {tesseract_exe}")
-
-    if not os.path.exists(tessdata_dir):
-        raise RuntimeError(f"Tessdata folder not found: {tessdata_dir}")
-
-    pytesseract.pytesseract.tesseract_cmd = tesseract_exe
-    os.environ["TESSDATA_PREFIX"] = tessdata_dir
-
-    return tessdata_dir
-
-
-TESSDATA_DIR = configure_tesseract()
-
-# ==========================================================
-# AI SYSTEM PROMPT — returns structured JSON
-# ==========================================================
-
-BASE_SYSTEM_PROMPT = """
-Return strict JSON in this exact shape (include every listed field):
-
-{
-  "plaintiff": ["Given Surname", ...],
-  "defendant": ["Given Surname", ...],
-  "case_numbers": ["I C 1234/25", ...],
-  "letter_type": "Pozew" | "Pozew + Postanowienie" |
-                 "Postanowienie" | "Portal" | "Korespondencja" |
-                 "Unknown" | "Zawiadomienie" |
-                 "Odpowiedź na pozew" | "Wniosek" | "Replika"
-}
-
-Rules:
-- Ignore DWF Poland Jamka and Raiffeisen Bank (do not include them in any party list).
-- Each list item MUST be EXACTLY TWO WORDS: "Given Surname".
-  If the person has multiple given names, KEEP ONLY THE FIRST given name.
-  Examples:
-    "Szymon Hubert Marciniak" -> "Szymon Marciniak"
-    "Katarzyna Magdalena Obałek" -> "Katarzyna Obałek"
-- Never include PESEL, addresses, or IDs.
-- Extract ALL case numbers.
-- Preserve Polish letters.
-- No commentary. Output JSON only.
-"""
-
-
-def build_system_prompt(custom_elements: dict[str, str]) -> str:
-    extras = ""
-    if custom_elements:
-        extra_lines = [f'"{name}": "string"' for name in custom_elements]
-        extras = ",\n  " + ",\n  ".join(extra_lines)
-        details = "\n".join(
-            [f'- {name}: {desc or "Return a concise string"}' for name, desc in custom_elements.items()]
-        )
-        guidance = f"\nCustom fields to add (as strings):\n{details}\n"
-    else:
-        guidance = ""
-    return BASE_SYSTEM_PROMPT.replace(
-        "}",
-        f'{extras}\n}}',
-        1,
-    ) + guidance
+from app_ai import extract_metadata_ai
+from app_constants import AI_BACKEND, DEFAULT_TEMPLATE_ELEMENTS, FILENAME_RULES
+from app_logging import append_distribution_log, log_exception, log_info
+from app_ocr import get_ocr_text
+from app_path_utils import validate_path_set
+from app_runtime import BASE_DIR
+from app_style import load_stylesheet
+from app_text_utils import (
+    apply_meta_defaults,
+    apply_party_order,
+    build_filename,
+    defendant_from_filename,
+    normalize_target_filename,
+    requirements_from_template,
+)
+from app_ui import show_friendly_error
 
 
 @dataclass
@@ -341,542 +54,10 @@ class NamingOptions:
     turbo_mode: bool
 
 
-def normalize_person_to_given_surname(s: str) -> str:
-    """
-    Returns 'Given Surname' (exactly 2 tokens), dropping middle names.
-    Handles common OCR noise and hyphenated surnames.
-    """
-    if not s:
-        return ""
-
-    # Trim + collapse whitespace
-    s = re.sub(r"\s+", " ", s.strip())
-
-    # Remove trailing commas/periods
-    s = s.strip(" ,.;:")
-
-    parts = s.split(" ")
-    if len(parts) == 1:
-        return s
-
-    # If AI accidentally returns "SURNAME Given ..." (common when OCR shows all-caps surname first)
-    # Heuristic: first token ALL CAPS (incl Polish), and later tokens not all-caps -> treat first as surname.
-    first = parts[0]
-    rest = parts[1:]
-    is_all_caps = (first.upper() == first) and any(ch.isalpha() for ch in first)
-
-    if is_all_caps and len(parts) >= 2:
-        surname = first.title()
-        given = rest[0].title()
-        return f"{given} {surname}"
-
-    if len(parts) == 2:
-        likely_surname_first_suffixes = (
-            "ski",
-            "ska",
-            "cki",
-            "cka",
-            "dzki",
-            "dzka",
-            "wicz",
-            "owicz",
-            "ewicz",
-            "icz",
-            "czyk",
-            "czak",
-            "czuk",
-            "uk",
-            "ak",
-            "ek",
-            "arz",
-            "asz",
-            "ysz",
-            "ów",
-            "owa",
-            "ewna",
-        )
-        first_lower = first.lower()
-        if first_lower.endswith(likely_surname_first_suffixes):
-            surname = first.title()
-            given = rest[0].title()
-            return f"{given} {surname}"
-
-    # Default: treat first as given, last as surname, drop middle names
-    given = parts[0].title()
-    surname = parts[-1].title()
-    return f"{given} {surname}"
-
-
-def clean_party_name(raw: str) -> str:
-    """Normalize party names extracted from OCR text while stripping address tails."""
-
-    name = raw.strip().strip("-:;•")
-    name = re.sub(r"^[\d.\)]+\s*", "", name)
-
-    # Remove obvious address fragments that often trail an entity name
-    address_markers = [
-        r"\b\d{2}-\d{3}\b",  # postal code
-        r"\bul\.?\b",
-        r"\bal\.?\b",
-        r"\bpl\.?\b",
-        r"\bplac\b",
-        r"\baleja\b",
-    ]
-    for marker in address_markers:
-        match = re.search(marker, name, flags=re.IGNORECASE)
-        if match:
-            name = name[: match.start()].rstrip(",; -")
-            break
-    name = re.sub(r"\(\s*z domu[^)]*\)", "", name, flags=re.IGNORECASE)
-    name = re.sub(r"(?i)\bz domu\b.*", "", name)
-    name = name.replace("(", "").replace(")", "")
-    name = re.sub(r"(?i)\bpesel[:\s]*\d[\d\s]{9,}\d\b", "", name)
-    name = re.sub(r"\b\d{11}\b", "", name)
-    name = re.sub(r"\s{2,}", " ", name)
-    name = name.strip()
-    max_tokens = FILENAME_RULES.get("person_token_limit")
-    if max_tokens and max_tokens > 0:
-        tokens = name.split()
-        if len(tokens) > max_tokens:
-            if max_tokens == 2 and len(tokens) >= 2:
-                # Preserve probable given + surname by keeping first and last tokens
-                name = " ".join([tokens[0], tokens[-1]])
-            else:
-                name = " ".join(tokens[:max_tokens])
-    return name[:80]
-
-
-def format_party_name(name: str, surname_first: bool) -> str:
-    normalized = normalize_person_to_given_surname(name) or name
-    tokens = [tok for tok in normalized.split() if tok]
-    if len(tokens) != 2:
-        return normalized
-
-    joined = " ".join(tokens)
-    if re.search(r"[\d/]", joined) or "." in joined:
-        return normalized
-
-    given, surname = tokens
-    if surname_first:
-        return f"{surname} {given}".strip()
-    return f"{given} {surname}".strip()
-
-
-def normalize_target_filename(name: str) -> str:
-    name = name.strip()
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-    if not name.lower().endswith(".pdf"):
-        name += ".pdf"
-    return name
-
-
-ROOT_PATH = os.path.abspath(os.sep)
-HOME_PATH = os.path.abspath(os.path.expanduser("~"))
-MIN_PATH_LENGTH = 10
-
-
-def _is_drive_root(path: str) -> bool:
-    normalized = os.path.abspath(path)
-    if normalized == ROOT_PATH:
-        return True
-    if os.name == "nt":
-        return bool(re.match(r"^[a-zA-Z]:\\\\?$", normalized))
-    return False
-
-
-def _is_parent_path(parent: str, child: str) -> bool:
-    try:
-        common = os.path.commonpath([parent, child])
-    except ValueError:
-        return False
-    return common == parent
-
-
-def validate_path_set(paths: List[tuple[str, str]]) -> tuple[bool, str]:
-    normalized: list[tuple[str, str]] = []
-    for label, raw_path in paths:
-        if not raw_path:
-            return False, f"{label} is empty"
-        abs_path = os.path.abspath(os.path.expanduser(raw_path))
-        if len(abs_path) <= MIN_PATH_LENGTH:
-            return False, f"{label} is too short to be safe: {abs_path}"
-        if _is_drive_root(abs_path):
-            return False, f"{label} points to a drive root: {abs_path}"
-        if abs_path == HOME_PATH:
-            return False, f"{label} points to the user home directory: {abs_path}"
-        normalized.append((label, abs_path))
-
-    for idx, (label_a, path_a) in enumerate(normalized):
-        for label_b, path_b in normalized[idx + 1 :]:
-            if path_a == path_b:
-                return False, f"{label_a} and {label_b} reference the same path: {path_a}"
-            if _is_parent_path(path_a, path_b):
-                return False, f"{label_a} is a parent of {label_b}: {path_a} -> {path_b}"
-            if _is_parent_path(path_b, path_a):
-                return False, f"{label_a} is a child of {label_b}: {path_a} -> {path_b}"
-    return True, ""
-
-
 def log_filesystem_action(operation: str, source: str, destination: str, status: str) -> None:
     log_info(
         f"[FS] {operation} | status={status} | source={os.path.abspath(source)} | destination={os.path.abspath(destination)}"
     )
-
-
-def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
-    temp_dir = tempfile.mkdtemp(prefix="ocr_")
-    try:
-        cmd = [
-            PDFTOPPM_EXE,
-            "-png",
-            "-f",
-            "1",
-            "-l",
-            str(max(1, pages)),
-            "-r",
-            str(dpi),
-            pdf_path,
-            os.path.join(temp_dir, "page"),
-        ]
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.png")))
-        if not image_paths:
-            # Fallback for environments where pdftoppm defaults to PPM
-            image_paths = sorted(glob.glob(os.path.join(temp_dir, "page-*.ppm")))
-
-        if not image_paths:
-            raise RuntimeError(
-                f"pdftoppm produced no output images for '{os.path.basename(pdf_path)}'"
-            )
-
-        text_chunks: list[str] = []
-        for image_file in image_paths:
-            chunk = pytesseract.image_to_string(Image.open(image_file), lang="pol")
-            text_chunks.append(chunk)
-            if len("".join(text_chunks)) >= char_limit:
-                break
-        text = "".join(text_chunks)[:char_limit]
-        return text
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-OCR_CACHE: Dict[str, dict] = {}
-OCR_CACHE_LOCK = threading.Lock()
-
-
-def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
-    normalized_pages = max(1, pages)
-    with OCR_CACHE_LOCK:
-        cached = OCR_CACHE.get(pdf_path)
-        if (
-            cached
-            and cached.get("dpi") == dpi
-            and cached.get("pages") == normalized_pages
-            and cached.get("char_limit", 0) >= char_limit
-        ):
-            cached_text = cached.get("ocr_text", "")[:char_limit]
-            log_info(
-                f"Reusing cached OCR for '{os.path.basename(pdf_path)}' "
-                f"(pages={normalized_pages}, dpi={dpi}, char_limit={char_limit})"
-            )
-            return cached_text
-    text = extract_text_ocr(pdf_path, char_limit, dpi, normalized_pages)
-    with OCR_CACHE_LOCK:
-        OCR_CACHE[pdf_path] = {
-            "ocr_text": text,
-            "char_limit": max(char_limit, len(text)),
-            "dpi": dpi,
-            "pages": normalized_pages,
-        }
-    return text
-
-
-def call_openai_model(text: str, prompt: str) -> str:
-    """Call OpenAI with fallback models, returning the raw content."""
-
-    if client is None:
-        raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY")
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-5-nano",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": text},
-            ],
-        )
-        return resp.choices[0].message.content
-    except Exception:
-        log_info("OpenAI gpt-5-nano failed; retrying with gpt-4.1-mini")
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
-        ],
-    )
-    return resp.choices[0].message.content
-
-
-def call_ollama_model(text: str, prompt: str) -> str:
-    """Call a local Ollama model using the same system prompt."""
-
-    try:
-        payload = {
-            "model": "qwen2.5:7b",
-            "prompt": f"{prompt}\n\n{text}",
-            "stream": False,
-        }
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        resp.raise_for_status()
-        body = resp.json()
-        message = body.get("message", {})
-        if message:
-            return message.get("content", "")
-        return body.get("response", "")
-    except Exception as e:
-        log_exception(e)
-        return ""
-
-
-def parse_json_content(content: str, source: str) -> dict:
-    """Parse JSON content from AI responses, stripping code fences if present."""
-
-    raw = (content or "").strip()
-
-    def attempt_parse(text: str):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
-
-    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
-    if fence_match:
-        raw = fence_match.group(1).strip()
-
-    parsed = attempt_parse(raw)
-    if parsed is None:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            parsed = attempt_parse(raw[start : end + 1])
-
-    if parsed is None:
-        snippet = raw[:120]
-        raise ValueError(
-            f"{source} did not return valid JSON. Received: '{snippet or 'empty response'}'"
-        )
-    return parsed
-
-
-def parse_ai_metadata(raw: str, custom_keys: list[str]) -> dict:
-    """Convert AI JSON into the meta structure expected by the app."""
-
-    try:
-        data = parse_json_content(raw, "AI response")
-    except Exception:
-        return {}
-
-    meta: dict[str, str] = {}
-
-    def prepare_party(key: str):
-        values = data.get(key)
-        if not isinstance(values, list):
-            return
-        cleaned: list[str] = []
-        for value in values:
-            if not isinstance(value, str):
-                continue
-            name = clean_party_name(value)
-            name = normalize_person_to_given_surname(name) or name
-            if not name:
-                continue
-            lower_name = name.lower()
-            if "dwf poland jamka" in lower_name:
-                continue
-            if FILENAME_RULES.get("remove_raiffeisen") and "raiffeisen" in lower_name:
-                continue
-            cleaned.append(name)
-        if FILENAME_RULES.get("primary_party_only"):
-            cleaned = cleaned[:1]
-        max_items = FILENAME_RULES.get("max_parties", len(cleaned))
-        if cleaned:
-            meta[key] = ", ".join(cleaned[:max_items])
-
-    prepare_party("plaintiff")
-    prepare_party("defendant")
-
-    lt = data.get("letter_type")
-    if isinstance(lt, str) and lt.strip():
-        meta["letter_type"] = lt.strip()
-
-    case_numbers = data.get("case_numbers")
-    if isinstance(case_numbers, list) and case_numbers:
-        first_case = next((c for c in case_numbers if isinstance(c, str) and c.strip()), "")
-        if first_case:
-            meta["case_number"] = first_case.strip()
-
-    for key in custom_keys:
-        val = data.get(key)
-        if isinstance(val, str) and val.strip():
-            meta[key] = val.strip()
-
-    return meta
-
-
-def query_backend_for_meta(target: str, ocr_text: str, custom_elements: dict[str, str]) -> dict:
-    prompt = build_system_prompt(custom_elements)
-    raw = ""
-    try:
-        if target == "ollama":
-            raw = call_ollama_model(ocr_text, prompt)
-        else:
-            raw = call_openai_model(ocr_text, prompt)
-        meta = parse_ai_metadata(raw, list(custom_elements.keys()))
-        if meta:
-            log_info(f"AI metadata extracted using {target}")
-            return meta
-    except Exception as e:
-        log_exception(e)
-    return {}
-
-
-def extract_metadata_ai_turbo(ocr_text: str, backends: list[str], custom_elements: dict[str, str], attempts_per_backend: int = 2) -> dict:
-    workers = max(1, len(backends) * attempts_per_backend)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {}
-        for target in backends:
-            for _ in range(attempts_per_backend):
-                future = executor.submit(query_backend_for_meta, target, ocr_text, custom_elements)
-                future_map[future] = target
-        for fut in as_completed(future_map):
-            try:
-                meta = fut.result()
-            except Exception as e:
-                log_exception(e)
-                continue
-            if meta:
-                for other in future_map:
-                    if other is not fut:
-                        other.cancel()
-                return meta
-    return {}
-
-
-def extract_metadata_ai(ocr_text: str, backend: str, custom_elements: dict[str, str], turbo: bool = False) -> dict:
-    """Use AI backend to extract metadata; returns empty dict on failure."""
-
-    if not ocr_text.strip():
-        return {}
-
-    if turbo:
-        backends = ["ollama", "openai"]
-        meta = extract_metadata_ai_turbo(ocr_text, backends, custom_elements)
-        if meta:
-            return meta
-    else:
-        backends = [backend]
-        if backend == "auto":
-            backends = ["ollama", "openai"]
-
-    for target in backends:
-        meta = query_backend_for_meta(target, ocr_text, custom_elements)
-        if meta:
-            return meta
-
-    return {}
-
-
-def requirements_from_template(template: list[str], custom_elements: dict[str, str] | None = None) -> dict:
-    requirements = {
-        "plaintiff": True if "plaintiff" in template else False,
-        "defendant": True if "defendant" in template else False,
-        "letter_type": True if "letter_type" in template else False,
-        "date": True if "date" in template else False,
-        "case_number": True if "case_number" in template else False,
-    }
-    if custom_elements:
-        for key in custom_elements:
-            requirements[key] = True
-    return requirements
-
-
-def apply_meta_defaults(meta: dict, requirements: dict) -> dict:
-    meta = meta.copy()
-    if requirements.get("date") and "date" not in meta:
-        meta["date"] = datetime.now().strftime("%Y-%m-%d")
-    if requirements.get("letter_type"):
-        meta.setdefault("letter_type", FILENAME_RULES.get("default_letter_type", "letter"))
-    if requirements.get("plaintiff"):
-        meta.setdefault("plaintiff", "Plaintiff")
-    if requirements.get("defendant"):
-        meta.setdefault("defendant", "Defendant")
-    if requirements.get("case_number"):
-        meta.setdefault("case_number", "Case-Number")
-    for key in requirements:
-        if key not in ("plaintiff", "defendant", "letter_type", "date", "case_number"):
-            meta.setdefault(key, key.replace("_", " ").title())
-    return meta
-
-
-def format_party_field(value, surname_first: bool) -> str:
-    names: list[str] = []
-    if isinstance(value, str):
-        names = [part.strip() for part in value.split(",") if part.strip()]
-    elif isinstance(value, list):
-        names = [str(item).strip() for item in value if str(item).strip()]
-    if not names:
-        return value if isinstance(value, str) else ""
-
-    formatted = [format_party_name(name, surname_first) for name in names]
-    return ", ".join(formatted)
-
-
-def defendant_from_filename(filename: str) -> str:
-    base = os.path.splitext(os.path.basename(filename))[0]
-    cleaned = re.sub(r"[_\\-]+", " ", base)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
-
-def apply_party_order(meta: dict, options: NamingOptions) -> dict:
-    meta = meta.copy()
-    if "plaintiff" in meta:
-        meta["plaintiff"] = format_party_field(
-            meta.get("plaintiff"), options.plaintiff_surname_first
-        )
-    if "defendant" in meta:
-        meta["defendant"] = format_party_field(
-            meta.get("defendant"), options.defendant_surname_first
-        )
-    return meta
-
-
-def build_filename(meta: dict, options: NamingOptions) -> str:
-    parts: list[str] = []
-    for element in options.template_elements:
-        value = meta.get(element, "")
-        if not value and element == "date":
-            value = datetime.now().strftime("%Y-%m-%d")
-        if value:
-            parts.append(str(value).strip())
-    filename = " - ".join(parts)
-    if not filename:
-        filename = "document"
-    filename = normalize_target_filename(filename)
-    return filename
 
 
 class FileProcessWorker(QThread):
@@ -930,7 +111,11 @@ class FileProcessWorker(QThread):
                 key for key in self.requirements if key not in raw_meta or not raw_meta.get(key)
             ]
             meta = apply_meta_defaults(raw_meta, self.requirements)
-            meta = apply_party_order(meta, self.options)
+            meta = apply_party_order(
+                meta,
+                plaintiff_surname_first=self.options.plaintiff_surname_first,
+                defendant_surname_first=self.options.defendant_surname_first,
+            )
 
             if defaults_applied:
                 log_info(
@@ -940,7 +125,7 @@ class FileProcessWorker(QThread):
                 f"[Worker {self.index + 1}] Extracted meta: {json.dumps(meta, ensure_ascii=False)}"
             )
 
-            filename = build_filename(meta, self.options)
+            filename = build_filename(meta, self.options.template_elements)
 
             log_info(
                 f"[Worker {self.index + 1}] Proposed filename: {filename} (backend={self.backend})"
@@ -3006,8 +2191,12 @@ class RenamerGUI(QMainWindow):
             meta = self.file_results[self.current_index].get("meta", meta)
         requirements = requirements_from_template(options.template_elements, options.custom_elements)
         meta = apply_meta_defaults(meta, requirements)
-        meta = apply_party_order(meta, options)
-        filename = build_filename(meta, options)
+        meta = apply_party_order(
+            meta,
+            plaintiff_surname_first=options.plaintiff_surname_first,
+            defendant_surname_first=options.defendant_surname_first,
+        )
+        filename = build_filename(meta, options.template_elements)
         if filename:
             self.filename_edit.blockSignals(True)
             self.filename_edit.setText(filename)
@@ -3382,7 +2571,11 @@ class RenamerGUI(QMainWindow):
                 raw_meta["defendant"] = fallback_defendant
         defaults_applied = [key for key in requirements if key not in raw_meta or not raw_meta.get(key)]
         meta = apply_meta_defaults(raw_meta, requirements)
-        meta = apply_party_order(meta, options)
+        meta = apply_party_order(
+            meta,
+            plaintiff_surname_first=options.plaintiff_surname_first,
+            defendant_surname_first=options.defendant_surname_first,
+        )
 
         if defaults_applied:
             self.log_activity(
@@ -3390,7 +2583,7 @@ class RenamerGUI(QMainWindow):
             )
         self.log_activity(f"[UI] Extracted meta: {json.dumps(meta, ensure_ascii=False)}")
 
-        filename = build_filename(meta, options)
+        filename = build_filename(meta, options.template_elements)
 
         self.log_activity(f"[UI] Proposed filename: {filename} (backend={AI_BACKEND})")
 
