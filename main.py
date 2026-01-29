@@ -66,7 +66,8 @@ class RenamerGUI(QMainWindow):
         self.file_results: dict[int, dict] = {}
         self.active_workers: dict[int, FileProcessWorker] = {}
         self.failed_indices: set[int] = set()
-        self.max_parallel_workers = 3
+        cpu_count = os.cpu_count() or 2
+        self.max_parallel_workers = max(2, min(4, cpu_count))
         self.stop_event = threading.Event()
         self.ui_ready = False
         self.distribution_plan: list[DistributionPlanItem] = []
