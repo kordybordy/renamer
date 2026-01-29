@@ -3,7 +3,9 @@ import sys
 from urllib.parse import urljoin
 
 
-API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# --------- HARD-CODED API KEY (EDIT THIS LINE!) ----------
+API_KEY = "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"
+# ----------------------------------------------------------
 
 AI_BACKEND_DEFAULT = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
