@@ -1,18 +1,11 @@
 import json
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
-from openai import OpenAI
-
+from ai_service import call_ollama_chat, call_openai_chat
 from app_constants import BASE_SYSTEM_PROMPT, FILENAME_RULES, OLLAMA_URL
 from app_logging import log_exception, log_info
 from app_text_utils import clean_party_name, normalize_person_to_given_surname
-
-
-API_KEY = os.environ.get("OPENAI_API_KEY", "")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
 
 
 def build_system_prompt(custom_elements: dict[str, str]) -> str:
@@ -36,48 +29,27 @@ def build_system_prompt(custom_elements: dict[str, str]) -> str:
 def call_openai_model(text: str, prompt: str) -> str:
     """Call OpenAI with fallback models, returning the raw content."""
 
-    if client is None:
-        raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY")
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-5-nano",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": text},
-            ],
-        )
-        return resp.choices[0].message.content
-    except Exception:
-        log_info("OpenAI gpt-5-nano failed; retrying with gpt-4.1-mini")
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
-        ],
+    return call_openai_chat(
+        system_prompt=prompt,
+        user_prompt=text,
+        model="gpt-5-nano",
+        fallback_model="gpt-4.1-mini",
+        temperature=None,
+        fallback_temperature=0.0,
+        log_info=lambda message: log_info(f"[AI] {message}"),
     )
-    return resp.choices[0].message.content
 
 
 def call_ollama_model(text: str, prompt: str) -> str:
     """Call a local Ollama model using the same system prompt."""
 
     try:
-        payload = {
-            "model": "qwen2.5:7b",
-            "prompt": f"{prompt}\n\n{text}",
-            "stream": False,
-        }
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        resp.raise_for_status()
-        body = resp.json()
-        message = body.get("message", {})
-        if message:
-            return message.get("content", "")
-        return body.get("response", "")
+        return call_ollama_chat(
+            prompt=f"{prompt}\n\n{text}",
+            url=OLLAMA_URL,
+            model="qwen2.5:7b",
+            timeout=120,
+        )
     except Exception as e:
         log_exception(e)
         return ""
@@ -178,7 +150,7 @@ def query_backend_for_meta(target: str, ocr_text: str, custom_elements: dict[str
             raw = call_openai_model(ocr_text, prompt)
         meta = parse_ai_metadata(raw, list(custom_elements.keys()))
         if meta:
-            log_info(f"AI metadata extracted using {target}")
+            log_info(f"[AI] metadata extracted using {target}")
             return meta
     except Exception as e:
         log_exception(e)

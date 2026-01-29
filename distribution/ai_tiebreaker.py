@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
 
-import requests
-from openai import OpenAI
+from ai_service import call_ollama_chat, call_openai_chat
 
 
 def _parse_json_content(content: str) -> dict[str, Any] | None:
@@ -31,49 +31,30 @@ def _parse_json_content(content: str) -> dict[str, Any] | None:
     return None
 
 
-def _openai_client() -> OpenAI | None:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return None
-    return OpenAI(api_key=api_key)
-
-
 def _call_openai(prompt: str) -> str:
-    client = _openai_client()
-    if not client:
-        return ""
-    resp = client.chat.completions.create(
+    return call_openai_chat(
+        system_prompt=(
+            "You are a strict JSON API. Return only JSON matching the schema. "
+            "Never include explanations."
+        ),
+        user_prompt=prompt,
         model="gpt-5-nano",
+        fallback_model="gpt-4.1-mini",
         temperature=0.0,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict JSON API. Return only JSON matching the schema. "
-                    "Never include explanations."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
+        fallback_temperature=0.0,
+        log_info=lambda message: logging.getLogger(__name__).info("[AI] %s", message),
     )
-    return resp.choices[0].message.content or ""
 
 
 def _call_ollama(prompt: str) -> str:
     host = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
     url = os.environ.get("OLLAMA_URL", f"{host.rstrip('/')}/api/generate")
-    payload = {
-        "model": "qwen2.5:7b",
-        "prompt": prompt,
-        "stream": False,
-    }
-    resp = requests.post(url, json=payload, timeout=120)
-    resp.raise_for_status()
-    body = resp.json()
-    message = body.get("message", {})
-    if message:
-        return message.get("content", "") or ""
-    return body.get("response", "") or ""
+    return call_ollama_chat(
+        prompt=prompt,
+        url=url,
+        model="qwen2.5:7b",
+        timeout=120,
+    )
 
 
 def build_prompt(doc: dict, candidates: list[dict]) -> str:
@@ -107,7 +88,10 @@ def choose_best_candidate(
             response_text = _call_ollama(prompt)
         else:
             response_text = _call_openai(prompt)
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            "AI tiebreaker failed (provider=%s): %s", provider, exc
+        )
         return None
 
     parsed = _parse_json_content(response_text)
