@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
@@ -40,6 +41,7 @@ class DistributionConfig:
     unassigned_include_ask: bool = False
     dest_exists_policy: str = "skip"
     apply_during_planning: bool = False
+    max_workers: int | None = None
 
     def normalized_stopwords(self) -> list[str]:
         if self.stopwords is None:
@@ -276,13 +278,13 @@ class DistributionEngine:
         audit_log_path: str | None = None,
     ) -> list[DistributionPlanItem]:
         folder_index = self.build_index()
-        plan: list[DistributionPlanItem] = []
+        plan: list[DistributionPlanItem | None] = [None] * len(pdf_files)
         total = len(pdf_files)
         processed = 0
         if audit_log_path:
             os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
         stopwords = self.config.normalized_stopwords()
-        for filename in pdf_files:
+        def build_plan_item(filename: str) -> DistributionPlanItem:
             if pause_event is not None:
                 pause_event.wait()
             pdf_path = os.path.join(self.input_folder, filename)
@@ -539,23 +541,45 @@ class DistributionEngine:
                 if applied_dest:
                     dest_path = applied_dest
 
-            plan.append(
-                DistributionPlanItem(
-                    source_pdf=pdf_path,
-                    chosen_folder=chosen_folder,
-                    candidates=candidates,
-                    decision=decision,
-                    confidence=confidence,
-                    reason=reason,
-                    dest_path=dest_path,
-                    result=result,
-                )
+            return DistributionPlanItem(
+                source_pdf=pdf_path,
+                chosen_folder=chosen_folder,
+                candidates=candidates,
+                decision=decision,
+                confidence=confidence,
+                reason=reason,
+                dest_path=dest_path,
+                result=result,
             )
-            processed += 1
-            if progress_cb:
-                progress_cb(processed, total, f"Planned {processed}/{total}")
 
-        return plan
+        max_workers = self.config.max_workers
+        if max_workers is None:
+            cpu_count = os.cpu_count() or 2
+            max_workers = min(4, cpu_count)
+
+        if max_workers < 2 or total < 2 or self.config.apply_during_planning:
+            for idx, filename in enumerate(pdf_files):
+                plan[idx] = build_plan_item(filename)
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total, f"Planned {processed}/{total}")
+            return [item for item in plan if item]
+
+        progress_lock = threading.Lock()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(build_plan_item, filename): idx
+                for idx, filename in enumerate(pdf_files)
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                plan[idx] = future.result()
+                with progress_lock:
+                    processed += 1
+                    if progress_cb:
+                        progress_cb(processed, total, f"Planned {processed}/{total}")
+
+        return [item for item in plan if item]
 
     def _apply_during_planning(
         self,
