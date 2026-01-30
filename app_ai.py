@@ -2,7 +2,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ai_service import call_ollama_chat, call_openai_chat
+from ai_service import OpenAIKeyMissingError, call_ollama_chat, call_openai_chat
 from app_constants import BASE_SYSTEM_PROMPT, FILENAME_RULES, OLLAMA_URL
 from app_logging import log_exception, log_info
 from app_text_utils import clean_party_name, normalize_person_to_given_surname
@@ -165,6 +165,9 @@ def query_backend_for_meta(target: str, ocr_text: str, custom_elements: dict[str
         if meta:
             log_info(f"[AI] metadata extracted using {target}")
             return meta
+    except OpenAIKeyMissingError as exc:
+        log_info(f"[AI] {exc}")
+        return {}
     except Exception as e:
         log_exception(e)
     return {}

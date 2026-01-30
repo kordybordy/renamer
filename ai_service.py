@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Callable
 
@@ -7,8 +8,48 @@ import requests
 from openai import OpenAI
 
 
-def _resolve_openai_key(api_key: str | None) -> str:
-    return api_key or os.environ.get("OPENAI_API_KEY", "")
+_DOTENV_LOADED = False
+
+
+class OpenAIKeyMissingError(RuntimeError):
+    pass
+
+
+def _load_dotenv() -> None:
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    env_path = os.path.join(os.getcwd(), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw or raw.startswith("#") or "=" not in raw:
+                    continue
+                key, value = raw.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
+
+
+def _resolve_openai_key() -> str:
+    if "OPENAI_API_KEY" not in os.environ:
+        _load_dotenv()
+    try:
+        return os.environ["OPENAI_API_KEY"]
+    except KeyError as exc:
+        logging.getLogger(__name__).warning(
+            "OpenAI API key missing. Set OPENAI_API_KEY in your environment to enable OpenAI requests."
+        )
+        raise OpenAIKeyMissingError(
+            "OpenAI API key not configured. Set the OPENAI_API_KEY environment variable."
+        ) from exc
 
 
 def _build_openai_messages(system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
@@ -24,11 +65,8 @@ def _call_openai(
     user_prompt: str,
     model: str,
     temperature: float | None,
-    api_key: str | None,
 ) -> str:
-    key = _resolve_openai_key(api_key)
-    if not key:
-        raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY")
+    key = _resolve_openai_key()
     client = OpenAI(api_key=key)
     payload = {
         "model": model,
@@ -48,7 +86,6 @@ def call_openai_chat(
     fallback_model: str = "gpt-4.1-mini",
     temperature: float | None = None,
     fallback_temperature: float | None = 0.0,
-    api_key: str | None = None,
     log_info: Callable[[str], None] | None = None,
 ) -> str:
     try:
@@ -57,8 +94,9 @@ def call_openai_chat(
             user_prompt=user_prompt,
             model=model,
             temperature=temperature,
-            api_key=api_key,
         )
+    except OpenAIKeyMissingError:
+        raise
     except Exception:
         if log_info:
             log_info(f"OpenAI {model} failed; retrying with {fallback_model}")
@@ -67,7 +105,6 @@ def call_openai_chat(
         user_prompt=user_prompt,
         model=fallback_model,
         temperature=fallback_temperature,
-        api_key=api_key,
     )
 
 
