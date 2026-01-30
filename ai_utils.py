@@ -3,10 +3,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 
-import requests
-
-from ai_service import OpenAIKeyMissingError, call_openai_chat
-from config import OLLAMA_URL, SYSTEM_PROMPT, FILENAME_RULES
+from ai_service import OpenAIKeyMissingError, call_ollama_chat, call_openai_chat
+from config import SYSTEM_PROMPT, FILENAME_RULES
 from logging_utils import log_exception, log_info
 from text_utils import apply_meta_defaults, apply_party_order, build_filename, clean_party_name, normalize_person_to_given_surname
 
@@ -25,18 +23,11 @@ def call_openai_model(text: str) -> str:
 
 def call_ollama_model(text: str) -> str:
     try:
-        payload = {
-            "model": "qwen2.5:7b",
-            "prompt": f"{SYSTEM_PROMPT}\n\n{text}",
-            "stream": False,
-        }
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        resp.raise_for_status()
-        body = resp.json()
-        message = body.get("message", {})
-        if message:
-            return message.get("content", "")
-        return body.get("response", "")
+        return call_ollama_chat(
+            prompt=f"{SYSTEM_PROMPT}\n\n{text}",
+            model="qwen2.5:7b",
+            timeout=120,
+        )
     except Exception as e:
         log_exception(e)
         return ""

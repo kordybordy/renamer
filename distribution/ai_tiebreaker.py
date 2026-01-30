@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any
 
@@ -47,11 +46,8 @@ def _call_openai(prompt: str) -> str:
 
 
 def _call_ollama(prompt: str) -> str:
-    host = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
-    url = os.environ.get("OLLAMA_URL", f"{host.rstrip('/')}/api/generate")
     return call_ollama_chat(
         prompt=prompt,
-        url=url,
         model="qwen2.5:7b",
         timeout=120,
     )

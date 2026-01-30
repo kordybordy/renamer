@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Callable
+from urllib.parse import urljoin
 
 import requests
 from openai import OpenAI
@@ -108,19 +109,47 @@ def call_openai_chat(
     )
 
 
+def get_ollama_base_url() -> str:
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+    if not base_url:
+        return "http://127.0.0.1:11434"
+    return base_url.rstrip("/")
+
+
+def _ollama_url(path: str) -> str:
+    return urljoin(f"{get_ollama_base_url()}/", path.lstrip("/"))
+
+
+def get_ollama_generate_url() -> str:
+    return _ollama_url("api/generate")
+
+
+def get_ollama_tags_url() -> str:
+    return _ollama_url("api/tags")
+
+
+def check_ollama_health(timeout: int = 2) -> bool:
+    try:
+        resp = requests.get(get_ollama_tags_url(), timeout=timeout)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
 def call_ollama_chat(
     *,
     prompt: str,
-    url: str,
+    url: str | None = None,
     model: str = "qwen2.5:7b",
     timeout: int = 120,
 ) -> str:
+    endpoint = url or get_ollama_generate_url()
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
     }
-    resp = requests.post(url, json=payload, timeout=timeout)
+    resp = requests.post(endpoint, json=payload, timeout=timeout)
     resp.raise_for_status()
     body = resp.json()
     message = body.get("message", {})
