@@ -4,38 +4,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 
 import requests
-from openai import OpenAI
 
-from config import API_KEY, OLLAMA_URL, SYSTEM_PROMPT, FILENAME_RULES
+from ai_service import OpenAIKeyMissingError, call_openai_chat
+from config import OLLAMA_URL, SYSTEM_PROMPT, FILENAME_RULES
 from logging_utils import log_exception, log_info
 from text_utils import apply_meta_defaults, apply_party_order, build_filename, clean_party_name, normalize_person_to_given_surname
 
 
-client = OpenAI(api_key=API_KEY)
-
-
 def call_openai_model(text: str) -> str:
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-5-nano",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-        )
-        return resp.choices[0].message.content
-    except Exception:
-        log_info("OpenAI gpt-5-nano failed; retrying with gpt-4.1-mini")
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
+    return call_openai_chat(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=text,
+        model="gpt-5-nano",
+        fallback_model="gpt-4.1-mini",
+        temperature=None,
+        fallback_temperature=0.0,
+        log_info=lambda message: log_info(f"[AI] {message}"),
     )
-    return resp.choices[0].message.content
 
 
 def call_ollama_model(text: str) -> str:
@@ -150,6 +135,9 @@ def query_backend_for_meta(target: str, ocr_text: str) -> dict:
         if meta:
             log_info(f"AI metadata extracted using {target}")
             return meta
+    except OpenAIKeyMissingError as exc:
+        log_info(str(exc))
+        return {}
     except Exception as e:
         log_exception(e)
     return {}

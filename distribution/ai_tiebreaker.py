@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from ai_service import call_ollama_chat, call_openai_chat
+from ai_service import OpenAIKeyMissingError, call_ollama_chat, call_openai_chat
 
 
 def _parse_json_content(content: str) -> dict[str, Any] | None:
@@ -88,6 +88,9 @@ def choose_best_candidate(
             response_text = _call_ollama(prompt)
         else:
             response_text = _call_openai(prompt)
+    except OpenAIKeyMissingError as exc:
+        logging.getLogger(__name__).warning("AI tiebreaker skipped: %s", exc)
+        return None
     except Exception as exc:
         logging.getLogger(__name__).exception(
             "AI tiebreaker failed (provider=%s): %s", provider, exc
