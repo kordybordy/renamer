@@ -16,6 +16,10 @@ class OpenAIKeyMissingError(RuntimeError):
     pass
 
 
+def _running_in_github_actions() -> bool:
+    return os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+
+
 def _load_dotenv() -> None:
     global _DOTENV_LOADED
     if _DOTENV_LOADED:
@@ -41,7 +45,8 @@ def _load_dotenv() -> None:
 
 def _resolve_openai_key() -> str:
     if "OPENAI_API_KEY" not in os.environ:
-        _load_dotenv()
+        if not _running_in_github_actions():
+            _load_dotenv()
     try:
         return os.environ["OPENAI_API_KEY"]
     except KeyError as exc:
