@@ -3,7 +3,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ai_service import OpenAIKeyMissingError, call_ollama_chat, call_openai_chat
-from app_constants import BASE_SYSTEM_PROMPT, FILENAME_RULES, OLLAMA_URL
+from app_constants import BASE_SYSTEM_PROMPT, FILENAME_RULES
 from app_logging import log_exception, log_info
 from app_text_utils import clean_party_name, normalize_person_to_given_surname
 
@@ -45,7 +45,6 @@ def call_ollama_model(text: str, prompt: str) -> str:
     try:
         return call_ollama_chat(
             prompt=f"{prompt}\n\n{text}",
-            url=OLLAMA_URL,
             model="qwen2.5:7b",
             timeout=120,
         )

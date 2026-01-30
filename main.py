@@ -22,6 +22,7 @@ from distribution.models import DistributionPlanItem
 from distribution.scorer import DEFAULT_STOPWORDS
 from distribution.safety import resolve_destination_path, validate_distribution_paths
 
+from ai_service import check_ollama_health
 from app_ai import extract_metadata_ai
 from app_constants import AI_BACKEND, DEFAULT_TEMPLATE_ELEMENTS, FILENAME_RULES
 from app_logging import append_distribution_log, log_exception, log_info
@@ -1095,11 +1096,7 @@ class RenamerGUI(QMainWindow):
                 self.ollama_badge.setText("⚙️ Auto")
             self.ollama_badge.setStyleSheet("")
             return
-        try:
-            resp = requests.get(urljoin(OLLAMA_HOST, "api/tags"), timeout=2)
-            ok = resp.status_code == 200
-        except Exception:
-            ok = False
+        ok = check_ollama_health()
         if ok:
             self.ollama_badge.setText("🟢 Connected")
             self.ollama_badge.setStyleSheet("color: #7CFC00;")

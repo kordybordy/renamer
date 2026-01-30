@@ -1,11 +1,9 @@
 import os
 import sys
-from urllib.parse import urljoin
 
 
 AI_BACKEND_DEFAULT = os.environ.get("AI_BACKEND", "openai")  # openai | ollama | auto
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "https://ollama.renamer.win/")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", urljoin(OLLAMA_HOST, "api/generate"))
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 FILENAME_RULES = {
     "remove_raiffeisen": True,        # always remove Raiffeisen from parties
