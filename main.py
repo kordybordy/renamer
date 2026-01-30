@@ -22,7 +22,7 @@ from distribution.models import DistributionPlanItem
 from distribution.scorer import DEFAULT_STOPWORDS
 from distribution.safety import resolve_destination_path, validate_distribution_paths
 
-from ai_service import check_ollama_health
+from ai_service import check_ollama_health, get_ollama_base_url
 from app_ai import extract_metadata_ai
 from app_constants import AI_BACKEND, DEFAULT_TEMPLATE_ELEMENTS, FILENAME_RULES
 from app_logging import append_distribution_log, log_exception, log_info
@@ -692,6 +692,39 @@ class RenamerGUI(QMainWindow):
         mode_group.setLayout(mode_row)
         self.distribution_layout.addWidget(mode_group)
 
+        unresolved_group = QGroupBox("UNRESOLVED HANDLING")
+        unresolved_layout = QVBoxLayout()
+        unresolved_layout.setSpacing(6)
+        self.distribution_create_unresolved_checkbox = QCheckBox(
+            "Create new folder for unresolved files"
+        )
+        self.distribution_create_unresolved_checkbox.setToolTip(
+            "When enabled, unresolved files can be routed into newly created case folders."
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_checkbox)
+        unresolved_scope_row = QHBoxLayout()
+        unresolved_scope_row.setSpacing(6)
+        unresolved_scope_row.addWidget(QLabel("Create folder for:"))
+        self.distribution_create_unresolved_scope_combo = QComboBox()
+        self.distribution_create_unresolved_scope_combo.addItem(
+            "UNMATCHED only", "unmatched_only"
+        )
+        self.distribution_create_unresolved_scope_combo.addItem(
+            "UNMATCHED + unresolved ASK", "unmatched_and_ask"
+        )
+        unresolved_scope_row.addWidget(self.distribution_create_unresolved_scope_combo)
+        unresolved_layout.addLayout(unresolved_scope_row)
+        self.distribution_create_unresolved_case_checkbox = QCheckBox(
+            "Include case number/tag in created folder name"
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_case_checkbox)
+        self.distribution_create_unresolved_dry_run_checkbox = QCheckBox(
+            "Dry-run folder creation (log only)"
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_dry_run_checkbox)
+        unresolved_group.setLayout(unresolved_layout)
+        self.distribution_layout.addWidget(unresolved_group)
+
         dist_controls_group = QGroupBox("EXECUTION")
         dist_controls = QHBoxLayout()
         dist_controls.setSpacing(6)
@@ -754,6 +787,11 @@ class RenamerGUI(QMainWindow):
             self.on_create_unresolved_workset
         )
         plan_controls.addWidget(self.distribution_unresolved_workset_button)
+        self.distribution_show_unresolved_button = QPushButton("Show unresolved only")
+        self.distribution_show_unresolved_button.clicked.connect(
+            self.on_show_unresolved_only
+        )
+        plan_controls.addWidget(self.distribution_show_unresolved_button)
         plan_controls.addStretch()
         plan_layout.addLayout(plan_controls)
         self.distribution_plan_table = QTableWidget(0, 6)
@@ -912,6 +950,16 @@ class RenamerGUI(QMainWindow):
         )
         fast_mode = self.settings.value("distribution_fast_mode", True)
         unassigned_ask = self.settings.value("distribution_unassigned_include_ask", False)
+        create_unresolved = self.settings.value("distribution_create_unresolved", False)
+        create_unresolved_scope = self.settings.value(
+            "distribution_create_unresolved_scope", "unmatched_only"
+        )
+        create_unresolved_case = self.settings.value(
+            "distribution_create_unresolved_case", False
+        )
+        create_unresolved_dry_run = self.settings.value(
+            "distribution_create_unresolved_dry_run", False
+        )
         self.distribution_auto_threshold_spin.setValue(int(auto_threshold))
         self.distribution_gap_threshold_spin.setValue(int(gap_threshold))
         self.distribution_ai_threshold_spin.setValue(float(ai_threshold))
@@ -933,6 +981,20 @@ class RenamerGUI(QMainWindow):
         )
         self.distribution_fast_mode_checkbox.setChecked(str(fast_mode).lower() != "false")
         self.distribution_unassigned_ask_checkbox.setChecked(str(unassigned_ask).lower() == "true")
+        self.distribution_create_unresolved_checkbox.setChecked(
+            str(create_unresolved).lower() == "true"
+        )
+        scope_index = self.distribution_create_unresolved_scope_combo.findData(
+            str(create_unresolved_scope)
+        )
+        if scope_index >= 0:
+            self.distribution_create_unresolved_scope_combo.setCurrentIndex(scope_index)
+        self.distribution_create_unresolved_case_checkbox.setChecked(
+            str(create_unresolved_case).lower() == "true"
+        )
+        self.distribution_create_unresolved_dry_run_checkbox.setChecked(
+            str(create_unresolved_dry_run).lower() == "true"
+        )
         saved_custom = self.settings.value("custom_elements", "{}")
         try:
             self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
@@ -1006,6 +1068,22 @@ class RenamerGUI(QMainWindow):
         )
         self.settings.setValue(
             "distribution_fast_mode", self.distribution_fast_mode_checkbox.isChecked()
+        )
+        self.settings.setValue(
+            "distribution_create_unresolved",
+            self.distribution_create_unresolved_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            "distribution_create_unresolved_scope",
+            self.distribution_create_unresolved_scope_combo.currentData(),
+        )
+        self.settings.setValue(
+            "distribution_create_unresolved_case",
+            self.distribution_create_unresolved_case_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            "distribution_create_unresolved_dry_run",
+            self.distribution_create_unresolved_dry_run_checkbox.isChecked(),
         )
 
     def closeEvent(self, event):
@@ -1396,6 +1474,16 @@ class RenamerGUI(QMainWindow):
             summary += "; ASK included"
         return summary
 
+    def describe_unresolved_folder_action(self, config: DistributionConfig) -> str:
+        if not config.create_unresolved_folders:
+            return "No auto-created folders for unresolved"
+        scope = "UNMATCHED only"
+        if config.create_unresolved_scope == "unmatched_and_ask":
+            scope = "UNMATCHED + unresolved ASK"
+        case_tag = "with case tag" if config.create_unresolved_include_case_number else "no case tag"
+        dry_run = "dry-run" if config.create_unresolved_dry_run else "create"
+        return f"{dry_run} folders for {scope} ({case_tag})"
+
     def get_sorted_plan(
         self, plan: list[DistributionPlanItem], sort_mode: str
     ) -> list[DistributionPlanItem]:
@@ -1525,6 +1613,13 @@ class RenamerGUI(QMainWindow):
             f"Work set created: {copied}/{len(unresolved)} files in {workset_dir}"
         )
 
+    def on_show_unresolved_only(self):
+        unresolved_index = self.distribution_filter_combo.findData("UNRESOLVED")
+        if unresolved_index < 0:
+            return
+        self.distribution_filter_combo.setCurrentIndex(unresolved_index)
+        self.apply_distribution_filter()
+
     def build_distribution_config(self) -> DistributionConfig:
         raw_stopwords = self.distribution_stopwords_edit.text()
         stopwords = [word.strip() for word in raw_stopwords.split(",") if word.strip()]
@@ -1538,6 +1633,7 @@ class RenamerGUI(QMainWindow):
             gap_threshold=float(self.distribution_gap_threshold_spin.value()),
             ai_threshold=float(self.distribution_ai_threshold_spin.value()),
             enable_ai_tiebreaker=self.distribution_use_ai_tiebreaker_checkbox.isChecked(),
+            ai_provider=self.get_ai_backend(),
             top_k=int(self.distribution_topk_spin.value()),
             stage2_k=stage2_k,
             candidate_pool_limit=candidate_pool_limit,
@@ -1547,6 +1643,18 @@ class RenamerGUI(QMainWindow):
             unassigned_include_ask=self.distribution_unassigned_ask_checkbox.isChecked(),
             dest_exists_policy=str(self.distribution_dest_exists_combo.currentData()),
             apply_during_planning=self.distribution_apply_during_planning_checkbox.isChecked(),
+            ollama_base_url=get_ollama_base_url(),
+            ollama_model=os.environ.get("OLLAMA_MODEL", "qwen2.5:7b"),
+            create_unresolved_folders=self.distribution_create_unresolved_checkbox.isChecked(),
+            create_unresolved_scope=str(
+                self.distribution_create_unresolved_scope_combo.currentData()
+            ),
+            create_unresolved_include_case_number=(
+                self.distribution_create_unresolved_case_checkbox.isChecked()
+            ),
+            create_unresolved_dry_run=(
+                self.distribution_create_unresolved_dry_run_checkbox.isChecked()
+            ),
         )
 
     def update_distribution_plan_table(self, plan: list[DistributionPlanItem]):
@@ -1575,7 +1683,7 @@ class RenamerGUI(QMainWindow):
 
             chooser = QComboBox()
             top_candidates = item.candidates[:5]
-            if item.decision == "ASK" and top_candidates:
+            if item.decision in ("ASK", "AI") and top_candidates:
                 chooser.addItem("Skip", "")
                 for candidate in top_candidates:
                     chooser.addItem(
@@ -1652,15 +1760,19 @@ class RenamerGUI(QMainWindow):
         selected_path = str(chooser.currentData() or "")
         if selected_path:
             plan_item.chosen_folder = selected_path
-            if plan_item.decision == "ASK":
+            if plan_item.decision in ("ASK", "AI"):
                 plan_item.confidence = 1.0
                 plan_item.reason = "User confirmed target folder"
+                if plan_item.decision == "AI":
+                    plan_item.decision = "ASK"
         else:
             plan_item.chosen_folder = None
-            if plan_item.decision == "ASK":
+            if plan_item.decision in ("ASK", "AI"):
                 plan_item.confidence = 0.0
                 if not plan_item.reason:
                     plan_item.reason = "Awaiting user selection"
+                if plan_item.decision == "AI":
+                    plan_item.decision = "ASK"
         self.update_distribution_plan_row_display(str(row_id))
 
     def collect_plan_for_apply(self) -> list[DistributionPlanItem]:
@@ -1745,6 +1857,7 @@ class RenamerGUI(QMainWindow):
         unassigned_summary = self.describe_unassigned_action(
             config.unassigned_action, config.unassigned_include_ask
         )
+        unresolved_summary = self.describe_unresolved_folder_action(config)
         apply_during_planning = config.apply_during_planning
         audit_log_path = None
         if apply_during_planning:
@@ -1769,6 +1882,7 @@ class RenamerGUI(QMainWindow):
                 f"Input folder: {input_dir}",
                 f"Case root: {case_root}",
                 f"Unassigned handling: {unassigned_summary}",
+                f"Unresolved handling: {unresolved_summary}",
                 f"Fast mode: {'On' if config.fast_mode else 'Off'}",
                 f"Streaming apply: {'On' if apply_during_planning else 'Off'}",
             ],
@@ -1861,12 +1975,14 @@ class RenamerGUI(QMainWindow):
         unassigned_summary = self.describe_unassigned_action(
             config.unassigned_action, config.unassigned_include_ask
         )
+        unresolved_summary = self.describe_unresolved_folder_action(config)
         if not self.confirm_batch_summary(
             "Confirm distribution apply",
             [
                 f"Input folder: {input_dir}",
                 f"Case root: {case_root}",
                 f"Unassigned handling: {unassigned_summary}",
+                f"Unresolved handling: {unresolved_summary}",
             ],
             dry_run=False,
             file_count=len(self.distribution_plan),
