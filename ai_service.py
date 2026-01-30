@@ -129,6 +129,15 @@ def get_ollama_generate_url() -> str:
     return _ollama_url("api/generate")
 
 
+def build_ollama_generate_url(base_url: str | None) -> str:
+    if not base_url:
+        return get_ollama_generate_url()
+    trimmed = base_url.strip().rstrip("/")
+    if not trimmed:
+        return get_ollama_generate_url()
+    return urljoin(f"{trimmed}/", "api/generate")
+
+
 def get_ollama_tags_url() -> str:
     return _ollama_url("api/tags")
 

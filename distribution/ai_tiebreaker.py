@@ -5,7 +5,12 @@ import logging
 import re
 from typing import Any
 
-from ai_service import OpenAIKeyMissingError, call_ollama_chat, call_openai_chat
+from ai_service import (
+    OpenAIKeyMissingError,
+    build_ollama_generate_url,
+    call_ollama_chat,
+    call_openai_chat,
+)
 
 
 def _parse_json_content(content: str) -> dict[str, Any] | None:
@@ -45,10 +50,11 @@ def _call_openai(prompt: str) -> str:
     )
 
 
-def _call_ollama(prompt: str) -> str:
+def _call_ollama(prompt: str, *, base_url: str | None, model: str) -> str:
     return call_ollama_chat(
         prompt=prompt,
-        model="qwen2.5:7b",
+        url=build_ollama_generate_url(base_url),
+        model=model,
         timeout=120,
     )
 
@@ -58,13 +64,13 @@ def build_prompt(doc: dict, candidates: list[dict]) -> str:
         "Pick the best matching folder based on opposing parties and case numbers.\n"
         "Return strict JSON in this exact shape:\n"
         "{\n"
-        "  \"chosen_folder\": \"<folder_name from candidates>\" | null,\n"
+        "  \"chosen_id\": \"<candidate_id from candidates>\" | null,\n"
         "  \"confidence\": 0.0-1.0,\n"
         "  \"reason\": \"short\"\n"
         "}\n"
         "Rules:\n"
         "- Only choose from the provided candidates list.\n"
-        "- If none are plausible, chosen_folder must be null.\n"
+        "- If none are plausible, chosen_id must be null.\n"
         "- Keep reason short.\n\n"
         f"DOC={json.dumps(doc, ensure_ascii=False)}\n"
         f"CANDIDATES={json.dumps(candidates, ensure_ascii=False)}"
@@ -76,12 +82,18 @@ def choose_best_candidate(
     doc_summary: dict,
     candidates: list[dict],
     provider: str,
+    ollama_base_url: str | None = None,
+    ollama_model: str = "qwen2.5:7b",
 ) -> dict[str, Any] | None:
     prompt = build_prompt(doc_summary, candidates)
     response_text = ""
     try:
         if provider == "ollama":
-            response_text = _call_ollama(prompt)
+            response_text = _call_ollama(
+                prompt,
+                base_url=ollama_base_url,
+                model=ollama_model,
+            )
         else:
             response_text = _call_openai(prompt)
     except OpenAIKeyMissingError as exc:
@@ -96,6 +108,6 @@ def choose_best_candidate(
     parsed = _parse_json_content(response_text)
     if not parsed:
         return None
-    if "chosen_folder" not in parsed:
+    if "chosen_id" not in parsed and "chosen_folder" not in parsed:
         return None
     return parsed
