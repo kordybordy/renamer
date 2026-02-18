@@ -20,6 +20,7 @@ pyinstaller ^
   --add-data "assets;assets" ^
   --add-data "modern.qss;." ^
   --add-data "retro.qss;." ^
+  --add-data "translations;translations" ^
   --add-data "poppler;poppler" ^
   --add-data "tesseract;tesseract" ^
   main.py

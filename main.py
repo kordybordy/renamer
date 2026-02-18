@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
     QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea
 )
-from PyQt6.QtCore import Qt, QSize, QSettings
+from PyQt6.QtCore import Qt, QSize, QSettings, QCoreApplication, QTranslator, QEvent
 from PyQt6.QtGui import QPixmap, QIcon, QPalette, QColor
 
 from distribution.engine import DistributionConfig
@@ -47,6 +47,12 @@ from app_workers import (
 )
 from ui_components import Card, SidebarButton, TopBarIconButton
 
+DEFAULT_LANGUAGE = "pl"
+SUPPORTED_LANGUAGES = {
+    "pl": "Polski",
+    "en": "English",
+}
+
 
 def log_filesystem_action(operation: str, source: str, destination: str, status: str) -> None:
     log_info(
@@ -59,6 +65,8 @@ class RenamerGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Renamer")
         self.settings = QSettings("Renamer", "Renamer")
+        self.translator = QTranslator()
+        self.current_language = DEFAULT_LANGUAGE
 
         # State
         self.pdf_files = []
@@ -118,10 +126,10 @@ class RenamerGUI(QMainWindow):
         title_col.setSpacing(4)
         title_label = QLabel("Renamer")
         title_label.setObjectName("TitleLabel")
-        subtitle_label = QLabel("Smart document naming")
-        subtitle_label.setObjectName("Subtitle")
+        self.subtitle_label = QLabel("Smart document naming")
+        self.subtitle_label.setObjectName("Subtitle")
         title_col.addWidget(title_label)
-        title_col.addWidget(subtitle_label)
+        title_col.addWidget(self.subtitle_label)
         brand_layout.addLayout(title_col)
         brand_layout.addStretch()
         brand_frame.setLayout(brand_layout)
@@ -484,6 +492,17 @@ class RenamerGUI(QMainWindow):
         self.turbo_mode_checkbox.setToolTip("Send a couple of requests to each backend and keep the first valid answer.")
         turbo_col.addWidget(self.turbo_mode_checkbox)
         ai_layout.addLayout(turbo_col)
+        language_col = QVBoxLayout()
+        language_col.setSpacing(6)
+        self.language_label = QLabel("Language:")
+        language_col.addWidget(self.language_label)
+        self.language_combo = QComboBox()
+        for code, name in SUPPORTED_LANGUAGES.items():
+            self.language_combo.addItem(name, code)
+        self.language_combo.currentIndexChanged.connect(self.on_language_changed)
+        language_col.addWidget(self.language_combo)
+        ai_layout.addLayout(language_col)
+
         ai_group.setLayout(ai_layout)
         controls_layout.addWidget(ai_group)
 
@@ -923,6 +942,7 @@ class RenamerGUI(QMainWindow):
         self.status_bar.addPermanentWidget(status_widget, 1)
         self.setStatusBar(self.status_bar)
 
+        self.retranslate_ui()
         self.rename_mode_button.setChecked(True)
         self.on_mode_changed(0)
         self.update_backend_status_label()
@@ -934,6 +954,45 @@ class RenamerGUI(QMainWindow):
         self.ui_ready = True
         self.update_preview()
         self.check_ollama_status()
+
+    def load_language(self, lang_code: str):
+        if lang_code not in SUPPORTED_LANGUAGES:
+            lang_code = DEFAULT_LANGUAGE
+        QCoreApplication.removeTranslator(self.translator)
+        self.translator = QTranslator()
+        qm_path = os.path.join(BASE_DIR, "translations", f"renamer_{lang_code}.qm")
+        if self.translator.load(qm_path):
+            QCoreApplication.installTranslator(self.translator)
+        self.current_language = lang_code
+        self.retranslate_ui()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.LanguageChange:
+            self.retranslate_ui()
+        super().changeEvent(event)
+
+    def on_language_changed(self):
+        if not self.ui_ready:
+            return
+        self.load_language(self.language_combo.currentData())
+        self.save_settings()
+
+    def retranslate_ui(self):
+        self.setWindowTitle(self.tr("Renamer"))
+        if hasattr(self, "subtitle_label"):
+            self.subtitle_label.setText(self.tr("Smart document naming"))
+        if hasattr(self, "rename_mode_button"):
+            self.rename_mode_button.setText(self.tr("Rename"))
+            self.filename_mode_button.setText(self.tr("Template"))
+            self.distribute_mode_button.setText(self.tr("Distribution"))
+            self.logs_mode_button.setText(self.tr("Logs"))
+            self.settings_mode_button.setText(self.tr("Settings"))
+        if hasattr(self, "status_label"):
+            self.status_label.setText(self.tr("Waiting for input…"))
+        if hasattr(self, "language_label"):
+            self.language_label.setText(self.tr("Language:"))
+        if hasattr(self, "backend_combo"):
+            self.update_backend_status_label()
 
     # ------------------------------------------------------
     # UI helpers
@@ -961,7 +1020,7 @@ class RenamerGUI(QMainWindow):
         if index < 0 or index >= self.content_stack.count():
             return
         self.content_stack.setCurrentIndex(index)
-        mode_names = ["Rename", "Filename Rules", "Distribute", "Logs"]
+        mode_names = [self.tr("Rename"), self.tr("Filename Rules"), self.tr("Distribute"), self.tr("Logs")]
         selected_mode = mode_names[index] if index < len(mode_names) else f"Mode {index}"
         self.append_status_message(f"[MODE] Switched to {selected_mode}")
 
@@ -970,7 +1029,7 @@ class RenamerGUI(QMainWindow):
             return
         backend_text = self.backend_combo.currentText()
         backend_name = backend_text.split("(")[0].strip()
-        self.backend_status_label.setText(f"AI: {backend_name}")
+        self.backend_status_label.setText(self.tr("AI: {backend}").format(backend=backend_name))
 
     def load_settings(self):
         self.input_edit.setText(self.settings.value("input_folder", ""))
@@ -1054,6 +1113,13 @@ class RenamerGUI(QMainWindow):
         self.distribution_create_unresolved_dry_run_checkbox.setChecked(
             str(create_unresolved_dry_run).lower() == "true"
         )
+        selected_language = self.settings.value("language", DEFAULT_LANGUAGE)
+        if selected_language not in SUPPORTED_LANGUAGES:
+            selected_language = DEFAULT_LANGUAGE
+        language_index = self.language_combo.findData(selected_language)
+        if language_index >= 0:
+            self.language_combo.setCurrentIndex(language_index)
+        self.load_language(selected_language)
         saved_custom = self.settings.value("custom_elements", "{}")
         try:
             self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
@@ -1144,6 +1210,7 @@ class RenamerGUI(QMainWindow):
             "distribution_create_unresolved_dry_run",
             self.distribution_create_unresolved_dry_run_checkbox.isChecked(),
         )
+        self.settings.setValue("language", self.language_combo.currentData())
 
     def closeEvent(self, event):
         self.save_settings()
