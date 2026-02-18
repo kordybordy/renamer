@@ -30,6 +30,11 @@ jobs:
           python -m pip show pyinstaller
           python -c "import PyInstaller; print('PyInstaller OK', PyInstaller.__version__)"
 
+      - name: Install translation compiler (PySide6 tools)
+        shell: pwsh
+        run: |
+          python -m pip install --no-cache-dir pyside6
+
       # ---------- POPPLER (pdftoppm) ----------
       - name: Download & prepare Poppler
         shell: pwsh
@@ -82,11 +87,18 @@ jobs:
             throw "pol.traineddata download failed"
           }
 
-      - name: Build translations (.qm) with PyQt6 module
+      - name: Build translations (.qm)
         shell: pwsh
         run: |
-          python -m PyQt6.lrelease translations/renamer_pl.ts -qm translations/renamer_pl.qm
-          python -m PyQt6.lrelease translations/renamer_en.ts -qm translations/renamer_en.qm
+          $ErrorActionPreference = "Stop"
+
+          # pyside6-lrelease is installed as a console script on Windows runners
+          pyside6-lrelease translations/renamer_pl.ts -qm translations/renamer_pl.qm
+          pyside6-lrelease translations/renamer_en.ts -qm translations/renamer_en.qm
+
+          if (!(Test-Path "translations\renamer_pl.qm")) { throw "Missing renamer_pl.qm" }
+          if (!(Test-Path "translations\renamer_en.qm")) { throw "Missing renamer_en.qm" }
+          Get-ChildItem translations\*.qm
 
       # ---------- BUILD ----------
       - name: Build (onedir)
