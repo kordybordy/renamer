@@ -2,9 +2,7 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -87,7 +85,7 @@ jobs:
       - name: Build (onedir)
         shell: pwsh
         run: |
-          python -m PyInstaller --onedir --windowed --name Renamer --icon "assets\logo.ico" --clean --noconfirm --add-data "assets;assets" --add-data "retro.qss;." --add-data "poppler\Library;poppler\Library" --add-data "tesseract;tesseract" main.py
+          python -m PyInstaller --onedir --windowed --name Renamer --icon "assets\logo.ico" --clean --noconfirm --add-data "assets;assets" --add-data "modern.qss;." --add-data "retro.qss;." --add-data "poppler\Library;poppler\Library" --add-data "tesseract;tesseract" main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
