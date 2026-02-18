@@ -45,7 +45,7 @@ from app_workers import (
     FileProcessWorker,
     NamingOptions,
 )
-from ui_components import Card, SidebarButton, TopBarIconButton
+from ui_components import Card, SidebarButton
 
 DEFAULT_LANGUAGE = "pl"
 SUPPORTED_LANGUAGES = {
@@ -63,6 +63,9 @@ def log_filesystem_action(operation: str, source: str, destination: str, status:
 class RenamerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
+        if os.path.exists(self.icon_path):
+            self.setWindowIcon(QIcon(self.icon_path))
         self.setWindowTitle("Renamer")
         self.settings = QSettings("Renamer", "Renamer")
         self.translator = QTranslator()
@@ -110,25 +113,25 @@ class RenamerGUI(QMainWindow):
         brand_layout.setContentsMargins(8, 8, 8, 8)
         brand_layout.setSpacing(8)
         logo_path = None
-        for candidate in ("logo-32.png", "logo-square.png", "logo.png"):
+        for candidate in ("logo-256.png", "logo-square.png", "logo_256x256.png"):
             candidate_path = os.path.join(BASE_DIR, "assets", candidate)
             if os.path.exists(candidate_path):
                 logo_path = candidate_path
                 break
         pixmap = QPixmap(logo_path) if logo_path else QPixmap()
         if not pixmap.isNull():
-            logo_label = QLabel()
-            logo_label.setPixmap(
-                pixmap.scaled(QSize(32, 32), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.logo_label = QLabel()
+            self.logo_label.setPixmap(
+                pixmap.scaled(QSize(56, 56), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
-            brand_layout.addWidget(logo_label)
+            brand_layout.addWidget(self.logo_label)
         title_col = QVBoxLayout()
         title_col.setSpacing(4)
-        title_label = QLabel("Renamer")
-        title_label.setObjectName("TitleLabel")
+        self.title_label = QLabel("Renamer")
+        self.title_label.setObjectName("TitleLabel")
         self.subtitle_label = QLabel("Smart document naming")
         self.subtitle_label.setObjectName("Subtitle")
-        title_col.addWidget(title_label)
+        title_col.addWidget(self.title_label)
         title_col.addWidget(self.subtitle_label)
         brand_layout.addLayout(title_col)
         brand_layout.addStretch()
@@ -155,6 +158,22 @@ class RenamerGUI(QMainWindow):
         ):
             self.mode_buttons.addButton(btn, idx)
             sidebar_layout.addWidget(btn)
+
+        language_flags_row = QHBoxLayout()
+        language_flags_row.setContentsMargins(8, 4, 8, 0)
+        language_flags_row.setSpacing(6)
+        self.btn_lang_pl = QToolButton()
+        self.btn_lang_en = QToolButton()
+        for button, label in ((self.btn_lang_pl, "PL"), (self.btn_lang_en, "EN")):
+            button.setText(label)
+            button.setAutoRaise(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setFixedSize(28, 22)
+            language_flags_row.addWidget(button)
+        language_flags_row.addStretch(1)
+        self.btn_lang_pl.clicked.connect(lambda: self.set_language("pl"))
+        self.btn_lang_en.clicked.connect(lambda: self.set_language("en"))
+        sidebar_layout.addLayout(language_flags_row)
         sidebar_layout.addStretch()
         self.sidebar_frame.setLayout(sidebar_layout)
         root_layout.addWidget(self.sidebar_frame)
@@ -163,24 +182,7 @@ class RenamerGUI(QMainWindow):
         right_container.setObjectName("ContentRoot")
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(12)
-
-        top_bar = QFrame()
-        top_bar.setObjectName("TopBar")
-        top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(12, 10, 12, 10)
-        top_layout.setSpacing(8)
-        top_layout.addStretch(1)
-        self.top_new_button = QPushButton("+ New")
-        self.top_new_button.setObjectName("PrimaryButton")
-        self.top_new_button.clicked.connect(self.choose_input)
-        top_layout.addWidget(self.top_new_button)
-        self.top_bell_button = TopBarIconButton("•")
-        self.top_user_button = TopBarIconButton("◦")
-        top_layout.addWidget(self.top_bell_button)
-        top_layout.addWidget(self.top_user_button)
-        top_bar.setLayout(top_layout)
-        right_layout.addWidget(top_bar)
+        right_layout.setSpacing(0)
 
         self.content_stack = QStackedWidget()
         right_layout.addWidget(self.content_stack, 1)
@@ -200,7 +202,7 @@ class RenamerGUI(QMainWindow):
         logs_page_layout.setContentsMargins(0, 0, 0, 0)
         logs_page_layout.setSpacing(12)
 
-        rename_logs_card = Card("RENAME LOG")
+        self.rename_logs_card = Card("RENAME LOG")
         rename_logs_layout = QVBoxLayout()
         rename_logs_layout.setSpacing(8)
         self.logs_page_view = QPlainTextEdit()
@@ -208,10 +210,10 @@ class RenamerGUI(QMainWindow):
         self.logs_page_view.setPlaceholderText("Status messages appear here")
         self.logs_page_view.setObjectName("StatusLog")
         rename_logs_layout.addWidget(self.logs_page_view)
-        rename_logs_card.setLayout(rename_logs_layout)
-        logs_page_layout.addWidget(rename_logs_card)
+        self.rename_logs_card.setLayout(rename_logs_layout)
+        logs_page_layout.addWidget(self.rename_logs_card)
 
-        distribution_logs_card = Card("DISTRIBUTION LOG")
+        self.distribution_logs_card = Card("DISTRIBUTION LOG")
         distribution_logs_layout = QVBoxLayout()
         distribution_logs_layout.setSpacing(8)
         self.distribution_log_view = QPlainTextEdit()
@@ -221,8 +223,8 @@ class RenamerGUI(QMainWindow):
         )
         self.distribution_log_view.setObjectName("StatusLog")
         distribution_logs_layout.addWidget(self.distribution_log_view)
-        distribution_logs_card.setLayout(distribution_logs_layout)
-        logs_page_layout.addWidget(distribution_logs_card)
+        self.distribution_logs_card.setLayout(distribution_logs_layout)
+        logs_page_layout.addWidget(self.distribution_logs_card)
 
         self.logs_page.setLayout(logs_page_layout)
 
@@ -266,40 +268,41 @@ class RenamerGUI(QMainWindow):
         main_page_layout.addWidget(self.main_scroll_area)
         self.main_page.setLayout(main_page_layout)
 
-        io_group = Card("PATHS")
+        self.io_group = Card("PATHS")
         io_layout = QVBoxLayout()
         io_layout.setSpacing(6)
         io_layout.setContentsMargins(12, 12, 12, 12)
         input_col = QVBoxLayout()
         input_col.setSpacing(6)
-        input_label = QLabel("Input folder:")
-        input_col.addWidget(input_label)
+        self.input_label = QLabel("Input folder:")
+        input_col.addWidget(self.input_label)
         self.input_edit = QLineEdit()
         input_row = QHBoxLayout()
         input_row.setSpacing(6)
         input_row.addWidget(self.input_edit)
-        btn_input = QPushButton("BROWSE")
-        btn_input.clicked.connect(self.choose_input)
-        input_row.addWidget(btn_input)
+        self.btn_input = QPushButton("BROWSE")
+        self.btn_input.clicked.connect(self.choose_input)
+        input_row.addWidget(self.btn_input)
         input_col.addLayout(input_row)
         io_layout.addLayout(input_col)
 
         output_col = QVBoxLayout()
         output_col.setSpacing(6)
-        output_col.addWidget(QLabel("Output folder:"))
+        self.output_label = QLabel("Output folder:")
+        output_col.addWidget(self.output_label)
         self.output_edit = QLineEdit()
         output_row = QHBoxLayout()
         output_row.setSpacing(6)
         output_row.addWidget(self.output_edit)
-        btn_output = QPushButton("BROWSE")
-        btn_output.clicked.connect(self.choose_output)
-        output_row.addWidget(btn_output)
+        self.btn_output = QPushButton("BROWSE")
+        self.btn_output.clicked.connect(self.choose_output)
+        output_row.addWidget(self.btn_output)
         output_col.addLayout(output_row)
         io_layout.addLayout(output_col)
-        io_group.setLayout(io_layout)
-        self.main_layout.addWidget(io_group)
+        self.io_group.setLayout(io_layout)
+        self.main_layout.addWidget(self.io_group)
 
-        action_group = Card("ACTIONS")
+        self.action_group = Card("ACTIONS")
         action_layout = QGridLayout()
         action_layout.setSpacing(6)
         action_layout.setContentsMargins(12, 12, 12, 12)
@@ -323,10 +326,10 @@ class RenamerGUI(QMainWindow):
         self.btn_all = btn_all
         action_layout.addWidget(btn_all, 1, 1)
         action_layout.setColumnStretch(3, 1)
-        action_group.setLayout(action_layout)
-        self.main_layout.addWidget(action_group)
+        self.action_group.setLayout(action_layout)
+        self.main_layout.addWidget(self.action_group)
 
-        table_group = Card("FILES")
+        self.table_group = Card("FILES")
         table_layout = QVBoxLayout()
         table_layout.setSpacing(6)
         table_layout.setContentsMargins(12, 12, 12, 12)
@@ -343,22 +346,23 @@ class RenamerGUI(QMainWindow):
         self.file_table.setMinimumHeight((10 * row_height) + header_height + 6)
         self.file_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         table_layout.addWidget(self.file_table)
-        table_group.setLayout(table_layout)
-        self.main_layout.addWidget(table_group)
+        self.table_group.setLayout(table_layout)
+        self.main_layout.addWidget(self.table_group)
 
-        preview_group = Card("FILENAME")
+        self.preview_group = Card("FILENAME")
         preview_layout = QVBoxLayout()
         preview_layout.setSpacing(6)
         preview_layout.setContentsMargins(12, 12, 12, 12)
         name_col = QVBoxLayout()
         name_col.setSpacing(6)
-        name_col.addWidget(QLabel("Proposed filename:"))
+        self.proposed_filename_label = QLabel("Proposed filename:")
+        name_col.addWidget(self.proposed_filename_label)
         self.filename_edit = QLineEdit()
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         name_col.addWidget(self.filename_edit)
         preview_layout.addLayout(name_col)
-        preview_group.setLayout(preview_layout)
-        self.main_layout.addWidget(preview_group)
+        self.preview_group.setLayout(preview_layout)
+        self.main_layout.addWidget(self.preview_group)
 
         ocr_group = Card("")
         ocr_layout = QVBoxLayout()
@@ -374,7 +378,8 @@ class RenamerGUI(QMainWindow):
         ocr_layout.addWidget(self.ocr_preview_label)
         ocr_layout.addWidget(self.ocr_preview)
         ocr_group.setLayout(ocr_layout)
-        self.main_layout.addWidget(build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True))
+        self.ocr_excerpt_toggle = build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True)
+        self.main_layout.addWidget(self.ocr_excerpt_toggle)
 
         copyright_label = QLabel("────────────────────")
         copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -945,6 +950,19 @@ class RenamerGUI(QMainWindow):
         self.current_language = lang_code
         self.retranslate_ui()
 
+    def set_language(self, lang_code: str, persist: bool = True):
+        if lang_code not in SUPPORTED_LANGUAGES:
+            lang_code = DEFAULT_LANGUAGE
+        self.load_language(lang_code)
+        if hasattr(self, "language_combo"):
+            idx = self.language_combo.findData(lang_code)
+            if idx >= 0 and self.language_combo.currentIndex() != idx:
+                self.language_combo.blockSignals(True)
+                self.language_combo.setCurrentIndex(idx)
+                self.language_combo.blockSignals(False)
+        if persist:
+            self.settings.setValue("ui_language", lang_code)
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.LanguageChange:
             self.retranslate_ui()
@@ -953,11 +971,13 @@ class RenamerGUI(QMainWindow):
     def on_language_changed(self):
         if not self.ui_ready:
             return
-        self.load_language(self.language_combo.currentData())
+        self.set_language(self.language_combo.currentData())
         self.save_settings()
 
     def retranslate_ui(self):
         self.setWindowTitle(self.tr("Renamer"))
+        if hasattr(self, "title_label"):
+            self.title_label.setText(self.tr("Renamer"))
         if hasattr(self, "subtitle_label"):
             self.subtitle_label.setText(self.tr("Smart document naming"))
         if hasattr(self, "rename_mode_button"):
@@ -965,6 +985,34 @@ class RenamerGUI(QMainWindow):
             self.distribute_mode_button.setText(self.tr("Distribute"))
             self.settings_mode_button.setText(self.tr("Settings"))
             self.logs_mode_button.setText(self.tr("Logs"))
+        if hasattr(self, "io_group"):
+            self.io_group.set_title(self.tr("PATHS"))
+            self.input_label.setText(self.tr("Input folder:"))
+            self.output_label.setText(self.tr("Output folder:"))
+            self.btn_input.setText(self.tr("BROWSE"))
+            self.btn_output.setText(self.tr("BROWSE"))
+        if hasattr(self, "action_group"):
+            self.action_group.set_title(self.tr("ACTIONS"))
+            self.play_button.setText(self.tr("SCAN"))
+            self.stop_button.setText(self.tr("STOP"))
+            self.reset_button.setText(self.tr("RESET"))
+            self.btn_process.setText(self.tr("EXECUTE ONE"))
+            self.btn_all.setText(self.tr("EXECUTE ALL"))
+        if hasattr(self, "table_group"):
+            self.table_group.set_title(self.tr("FILES"))
+            self.file_table.setHorizontalHeaderLabels([self.tr("PDF file"), self.tr("Proposed filename")])
+        if hasattr(self, "preview_group"):
+            self.preview_group.set_title(self.tr("FILENAME"))
+            self.proposed_filename_label.setText(self.tr("Proposed filename:"))
+            self.ocr_preview_label.setText(self.tr("OCR text sent to AI:"))
+            self.ocr_preview.setPlaceholderText(self.tr("The OCR excerpt forwarded to the AI/backend will appear here."))
+        if hasattr(self, "rename_logs_card"):
+            self.rename_logs_card.set_title(self.tr("RENAME LOG"))
+            self.distribution_logs_card.set_title(self.tr("DISTRIBUTION LOG"))
+            self.logs_page_view.setPlaceholderText(self.tr("Status messages appear here"))
+            self.distribution_log_view.setPlaceholderText(self.tr("Distribution details appear here. Copies are logged to disk as well."))
+        if hasattr(self, "distribution_status_label") and self.distribution_status_label.text() == "Idle":
+            self.distribution_status_label.setText(self.tr("Idle"))
         if hasattr(self, "status_label"):
             self.status_label.setText(self.tr("Waiting for input…"))
         if hasattr(self, "language_label"):
@@ -974,6 +1022,9 @@ class RenamerGUI(QMainWindow):
         if hasattr(self, "settings_tabs"):
             self.settings_tabs.setTabText(0, self.tr("Rename Settings"))
             self.settings_tabs.setTabText(1, self.tr("Distribution Settings"))
+        if hasattr(self, "btn_lang_pl"):
+            self.btn_lang_pl.setToolTip(self.tr("Polski"))
+            self.btn_lang_en.setToolTip(self.tr("English"))
 
     # ------------------------------------------------------
     # UI helpers
@@ -1098,13 +1149,15 @@ class RenamerGUI(QMainWindow):
         self.distribution_create_unresolved_dry_run_checkbox.setChecked(
             str(create_unresolved_dry_run).lower() == "true"
         )
-        selected_language = self.settings.value("language", DEFAULT_LANGUAGE)
+        selected_language = self.settings.value(
+            "ui_language", self.settings.value("language", DEFAULT_LANGUAGE)
+        )
         if selected_language not in SUPPORTED_LANGUAGES:
             selected_language = DEFAULT_LANGUAGE
         language_index = self.language_combo.findData(selected_language)
         if language_index >= 0:
             self.language_combo.setCurrentIndex(language_index)
-        self.load_language(selected_language)
+        self.set_language(selected_language, persist=False)
         saved_custom = self.settings.value("custom_elements", "{}")
         try:
             self.custom_elements = json.loads(saved_custom) if isinstance(saved_custom, str) else (saved_custom or {})
@@ -1194,7 +1247,8 @@ class RenamerGUI(QMainWindow):
             "distribution_create_unresolved_dry_run",
             self.distribution_create_unresolved_dry_run_checkbox.isChecked(),
         )
-        self.settings.setValue("language", self.language_combo.currentData())
+        self.settings.setValue("ui_language", self.current_language)
+        self.settings.setValue("language", self.current_language)
 
     def closeEvent(self, event):
         self.save_settings()
@@ -2755,15 +2809,13 @@ if __name__ == "__main__":
     retro_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
     app.setPalette(retro_palette)
 
-    logo_path = os.path.join(BASE_DIR, "assets", "logo.png")
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
-    icon_file = icon_path if os.path.exists(icon_path) else logo_path
-    if os.path.exists(icon_file):
-        app.setWindowIcon(QIcon(icon_file))
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     gui = RenamerGUI()
-    if icon_file and os.path.exists(icon_file):
-        gui.setWindowIcon(QIcon(icon_file))
+    if os.path.exists(icon_path):
+        gui.setWindowIcon(QIcon(icon_path))
     gui.show()
 
     sys.exit(app.exec())

@@ -25,6 +25,10 @@ class Card(QFrame):
         wrapper.addWidget(self._body)
         super().setLayout(wrapper)
 
+    def set_title(self, title: str):
+        if self._title:
+            self._title.setText(title)
+
 
 class SidebarButton(QPushButton):
     def __init__(self, text: str, icon_path: str = "", parent: QWidget | None = None):

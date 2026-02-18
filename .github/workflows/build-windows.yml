@@ -81,11 +81,35 @@ jobs:
             throw "pol.traineddata download failed"
           }
 
+      - name: Install Qt tools (lrelease)
+        shell: pwsh
+        run: |
+          python -m pip install --no-cache-dir pyqt6-tools
+
+      - name: Build translations (.qm)
+        shell: pwsh
+        run: |
+          python -c "import sys; print(sys.executable)"
+          $lreleaseCmd = Get-Command lrelease -ErrorAction SilentlyContinue
+          if ($lreleaseCmd) {
+            $lreleaseExe = $lreleaseCmd.Source
+          } else {
+            $pyRoot = (python -c "import sys; print(sys.prefix)")
+            $candidates = @(
+              (Join-Path $pyRoot "Scripts\lrelease.exe"),
+              (Join-Path $pyRoot "Lib\site-packages\PyQt6\Qt6\bin\lrelease.exe")
+            )
+            $lreleaseExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $lreleaseExe) { throw "lrelease not found" }
+          & $lreleaseExe translations/renamer_pl.ts -qm translations/renamer_pl.qm
+          & $lreleaseExe translations/renamer_en.ts -qm translations/renamer_en.qm
+
       # ---------- BUILD ----------
       - name: Build (onedir)
         shell: pwsh
         run: |
-          python -m PyInstaller --onedir --windowed --name Renamer --icon "assets\logo.ico" --clean --noconfirm --add-data "assets;assets" --add-data "modern.qss;." --add-data "retro.qss;." --add-data "poppler\Library;poppler\Library" --add-data "tesseract;tesseract" main.py
+          python -m PyInstaller --onedir --windowed --name Renamer --icon "assets\logo.ico" --clean --noconfirm --add-data "assets;assets" --add-data "translations;translations" --add-data "modern.qss;." --add-data "retro.qss;." --add-data "poppler\Library;poppler\Library" --add-data "tesseract;tesseract" main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
