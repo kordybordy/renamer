@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar, QSizePolicy,
     QStatusBar, QAbstractItemView, QStackedWidget, QFrame, QGroupBox,
-    QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea
+    QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea, QTabWidget, QGridLayout
 )
 from PyQt6.QtCore import Qt, QSize, QSettings, QCoreApplication, QTranslator, QEvent
 from PyQt6.QtGui import QPixmap, QIcon, QPalette, QColor
@@ -141,24 +141,20 @@ class RenamerGUI(QMainWindow):
 
         icon_dir = os.path.join(BASE_DIR, "assets", "icons")
         self.rename_mode_button = SidebarButton("Rename", os.path.join(icon_dir, "rename.svg"))
-        self.filename_mode_button = SidebarButton("Template", os.path.join(icon_dir, "template.svg"))
-        self.distribute_mode_button = SidebarButton("Distribution", os.path.join(icon_dir, "distribution.svg"))
-        self.logs_mode_button = SidebarButton("Logs", os.path.join(icon_dir, "logs.svg"))
+        self.distribute_mode_button = SidebarButton("Distribute", os.path.join(icon_dir, "distribution.svg"))
         self.settings_mode_button = SidebarButton("Settings", os.path.join(icon_dir, "settings.svg"))
-        self.settings_mode_button.setEnabled(False)
+        self.logs_mode_button = SidebarButton("Logs", os.path.join(icon_dir, "logs.svg"))
 
         for idx, btn in enumerate(
             (
                 self.rename_mode_button,
-                self.filename_mode_button,
                 self.distribute_mode_button,
+                self.settings_mode_button,
                 self.logs_mode_button,
             )
         ):
             self.mode_buttons.addButton(btn, idx)
             sidebar_layout.addWidget(btn)
-
-        sidebar_layout.addWidget(self.settings_mode_button)
         sidebar_layout.addStretch()
         self.sidebar_frame.setLayout(sidebar_layout)
         root_layout.addWidget(self.sidebar_frame)
@@ -174,10 +170,7 @@ class RenamerGUI(QMainWindow):
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(12, 10, 12, 10)
         top_layout.setSpacing(8)
-        self.top_search_edit = QLineEdit()
-        self.top_search_edit.setObjectName("TopSearch")
-        self.top_search_edit.setPlaceholderText("Search files, cases, or logs")
-        top_layout.addWidget(self.top_search_edit, 1)
+        top_layout.addStretch(1)
         self.top_new_button = QPushButton("+ New")
         self.top_new_button.setObjectName("PrimaryButton")
         self.top_new_button.clicked.connect(self.choose_input)
@@ -199,23 +192,38 @@ class RenamerGUI(QMainWindow):
         self.distribution_page = QWidget()
         self.logs_page = QWidget()
         self.content_stack.addWidget(self.main_page)
-        self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.distribution_page)
+        self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.logs_page)
 
         logs_page_layout = QVBoxLayout()
         logs_page_layout.setContentsMargins(0, 0, 0, 0)
-        logs_page_layout.setSpacing(0)
-        logs_card = Card("STATUS LOG")
-        logs_layout = QVBoxLayout()
-        logs_layout.setSpacing(8)
+        logs_page_layout.setSpacing(12)
+
+        rename_logs_card = Card("RENAME LOG")
+        rename_logs_layout = QVBoxLayout()
+        rename_logs_layout.setSpacing(8)
         self.logs_page_view = QPlainTextEdit()
         self.logs_page_view.setReadOnly(True)
         self.logs_page_view.setPlaceholderText("Status messages appear here")
         self.logs_page_view.setObjectName("StatusLog")
-        logs_layout.addWidget(self.logs_page_view)
-        logs_card.setLayout(logs_layout)
-        logs_page_layout.addWidget(logs_card)
+        rename_logs_layout.addWidget(self.logs_page_view)
+        rename_logs_card.setLayout(rename_logs_layout)
+        logs_page_layout.addWidget(rename_logs_card)
+
+        distribution_logs_card = Card("DISTRIBUTION LOG")
+        distribution_logs_layout = QVBoxLayout()
+        distribution_logs_layout.setSpacing(8)
+        self.distribution_log_view = QPlainTextEdit()
+        self.distribution_log_view.setReadOnly(True)
+        self.distribution_log_view.setPlaceholderText(
+            "Distribution details appear here. Copies are logged to disk as well."
+        )
+        self.distribution_log_view.setObjectName("StatusLog")
+        distribution_logs_layout.addWidget(self.distribution_log_view)
+        distribution_logs_card.setLayout(distribution_logs_layout)
+        logs_page_layout.addWidget(distribution_logs_card)
+
         self.logs_page.setLayout(logs_page_layout)
 
         def build_collapsible_section(title: str, body: QWidget, collapsed: bool = True) -> QWidget:
@@ -288,32 +296,33 @@ class RenamerGUI(QMainWindow):
         output_row.addWidget(btn_output)
         output_col.addLayout(output_row)
         io_layout.addLayout(output_col)
-        safety_row = QHBoxLayout()
-        safety_row.setSpacing(6)
-        self.rename_dry_run_checkbox = QCheckBox("Dry run (preview copy destinations)")
-        self.rename_dry_run_checkbox.setToolTip("Plan copy operations without writing any files.")
-        safety_row.addWidget(self.rename_dry_run_checkbox)
-        safety_row.addStretch()
-        io_layout.addLayout(safety_row)
         io_group.setLayout(io_layout)
         self.main_layout.addWidget(io_group)
 
-        action_group = Card("COMMAND")
-        action_layout = QHBoxLayout()
+        action_group = Card("ACTIONS")
+        action_layout = QGridLayout()
         action_layout.setSpacing(6)
         action_layout.setContentsMargins(12, 12, 12, 12)
-        action_layout.addStretch()
         self.play_button = QPushButton("SCAN")
         self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
-        action_layout.addWidget(self.play_button)
+        action_layout.addWidget(self.play_button, 0, 0)
         self.stop_button = QPushButton("STOP")
         self.stop_button.clicked.connect(self.stop_generation)
-        action_layout.addWidget(self.stop_button)
+        action_layout.addWidget(self.stop_button, 0, 1)
         self.reset_button = QPushButton("RESET")
         self.reset_button.clicked.connect(self.stop_and_reprocess)
-        action_layout.addWidget(self.reset_button)
-        action_layout.addStretch()
+        action_layout.addWidget(self.reset_button, 0, 2)
+        btn_process = QPushButton("EXECUTE ONE")
+        btn_process.clicked.connect(self.process_this_file)
+        self.btn_process = btn_process
+        action_layout.addWidget(btn_process, 1, 0)
+
+        btn_all = QPushButton("EXECUTE ALL")
+        btn_all.clicked.connect(self.process_all_files_safe)
+        self.btn_all = btn_all
+        action_layout.addWidget(btn_all, 1, 1)
+        action_layout.setColumnStretch(3, 1)
         action_group.setLayout(action_layout)
         self.main_layout.addWidget(action_group)
 
@@ -329,6 +338,10 @@ class RenamerGUI(QMainWindow):
         self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
         self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
         self.file_table.cellClicked.connect(self.on_row_selected)
+        row_height = self.file_table.verticalHeader().defaultSectionSize()
+        header_height = self.file_table.horizontalHeader().height()
+        self.file_table.setMinimumHeight((10 * row_height) + header_height + 6)
+        self.file_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         table_layout.addWidget(self.file_table)
         table_group.setLayout(table_layout)
         self.main_layout.addWidget(table_group)
@@ -363,47 +376,16 @@ class RenamerGUI(QMainWindow):
         ocr_group.setLayout(ocr_layout)
         self.main_layout.addWidget(build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True))
 
-        log_group = Card("")
-        log_layout = QVBoxLayout()
-        log_layout.setSpacing(6)
-        log_layout.setContentsMargins(12, 12, 12, 12)
-        self.status_log = QPlainTextEdit()
-        self.status_log.setReadOnly(True)
-        self.status_log.setPlaceholderText("[hh:mm:ss] status messages appear here")
-        self.status_log.setMinimumHeight(110)
-        self.status_log.setObjectName("StatusLog")
-        log_layout.addWidget(self.status_log)
-        log_group.setLayout(log_layout)
-        self.main_layout.addWidget(build_collapsible_section("STATUS LOG", log_group, collapsed=True))
-
-        bottom_group = Card("ACTIONS")
-        bottom_layout = QHBoxLayout()
-        bottom_layout.setSpacing(6)
-        bottom_layout.setContentsMargins(12, 12, 12, 12)
-        btn_process = QPushButton("EXECUTE ONE")
-        btn_process.clicked.connect(self.process_this_file)
-        self.btn_process = btn_process
-
-        btn_all = QPushButton("EXECUTE ALL")
-        btn_all.clicked.connect(self.process_all_files_safe)
-        self.btn_all = btn_all
-
-        bottom_layout.addWidget(btn_process)
-        bottom_layout.addWidget(btn_all)
-        bottom_layout.addStretch()
-        bottom_group.setLayout(bottom_layout)
-        self.main_layout.addWidget(bottom_group)
-
         copyright_label = QLabel("────────────────────")
         copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_layout.addWidget(copyright_label)
 
-        # Settings page (Page 1)
+        # Settings page (Page 2)
         self.settings_scroll_area = QScrollArea()
         self.settings_scroll_area.setWidgetResizable(True)
         self.settings_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.settings_scroll_container = QWidget()
-        self.settings_layout = QHBoxLayout()
+        self.settings_layout = QVBoxLayout()
         self.settings_layout.setSpacing(12)
         self.settings_scroll_container.setLayout(self.settings_layout)
         self.settings_scroll_area.setWidget(self.settings_scroll_container)
@@ -412,10 +394,34 @@ class RenamerGUI(QMainWindow):
         settings_page_layout.addWidget(self.settings_scroll_area)
         self.settings_page.setLayout(settings_page_layout)
 
-        controls_group = Card("AI + OCR")
+        self.settings_tabs = QTabWidget()
+        self.rename_settings_tab = QWidget()
+        self.distribution_settings_tab = QWidget()
+        self.settings_tabs.addTab(self.rename_settings_tab, "Rename Settings")
+        self.settings_tabs.addTab(self.distribution_settings_tab, "Distribution Settings")
+
+        rename_settings_layout = QVBoxLayout()
+        rename_settings_layout.setSpacing(12)
+        self.rename_settings_tab.setLayout(rename_settings_layout)
+
+        distribution_settings_layout = QVBoxLayout()
+        distribution_settings_layout.setSpacing(12)
+        self.distribution_settings_tab.setLayout(distribution_settings_layout)
+        self.settings_layout.addWidget(self.settings_tabs)
+
+        controls_group = Card("RENAME SETTINGS")
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(12)
         controls_layout.setContentsMargins(12, 12, 12, 12)
+
+        rename_safety_group = Card("RENAME SAFETY")
+        rename_safety_layout = QVBoxLayout()
+        rename_safety_layout.setSpacing(6)
+        self.rename_dry_run_checkbox = QCheckBox("Dry run (preview copy destinations)")
+        self.rename_dry_run_checkbox.setToolTip("Plan copy operations without writing any files.")
+        rename_safety_layout.addWidget(self.rename_dry_run_checkbox)
+        rename_safety_group.setLayout(rename_safety_layout)
+        controls_layout.addWidget(rename_safety_group)
 
         ocr_group = Card("OCR SETTINGS")
         ocr_layout = QVBoxLayout()
@@ -509,27 +515,78 @@ class RenamerGUI(QMainWindow):
         order_group = Card("NAME ORDER")
         order_layout = QVBoxLayout()
         order_layout.setSpacing(6)
-        plaintiff_col = QVBoxLayout()
-        plaintiff_col.setSpacing(6)
-        plaintiff_col.addWidget(QLabel("Plaintiff order:"))
-        self.plaintiff_order_combo = QComboBox()
-        self.plaintiff_order_combo.addItem("Surname Name", True)
-        self.plaintiff_order_combo.addItem("Name Surname", False)
-        self.plaintiff_order_combo.currentIndexChanged.connect(self.update_preview)
-        plaintiff_col.addWidget(self.plaintiff_order_combo)
-        order_layout.addLayout(plaintiff_col)
-
-        defendant_col = QVBoxLayout()
-        defendant_col.setSpacing(6)
-        defendant_col.addWidget(QLabel("Defendant order:"))
-        self.defendant_order_combo = QComboBox()
-        self.defendant_order_combo.addItem("Surname Name", True)
-        self.defendant_order_combo.addItem("Name Surname", False)
-        self.defendant_order_combo.currentIndexChanged.connect(self.update_preview)
-        defendant_col.addWidget(self.defendant_order_combo)
-        order_layout.addLayout(defendant_col)
+        order_layout.addWidget(QLabel("Party order:"))
+        self.party_order_combo = QComboBox()
+        self.party_order_combo.addItem("Defendants first", "defendant_plaintiff")
+        self.party_order_combo.addItem("Plaintiffs first", "plaintiff_defendant")
+        self.party_order_combo.currentIndexChanged.connect(self.update_preview)
+        order_layout.addWidget(self.party_order_combo)
         order_group.setLayout(order_layout)
         controls_layout.addWidget(order_group)
+
+        controls_group.setLayout(controls_layout)
+        rename_settings_layout.addWidget(controls_group)
+
+        template_group = Card("FILENAME TEMPLATE")
+        template_layout = QVBoxLayout()
+        template_layout.setSpacing(6)
+        template_layout.setContentsMargins(12, 12, 12, 12)
+
+        selector_col = QVBoxLayout()
+        selector_col.setSpacing(6)
+        selector_col.addWidget(QLabel("Add element:"))
+        selector_row = QHBoxLayout()
+        selector_row.setSpacing(6)
+        self.template_selector = QComboBox()
+        self.template_selector.addItem("Date (today)", "date")
+        self.template_selector.addItem("Plaintiff", "plaintiff")
+        self.template_selector.addItem("Defendant", "defendant")
+        self.template_selector.addItem("Letter type", "letter_type")
+        self.template_selector.addItem("Case number", "case_number")
+        selector_row.addWidget(self.template_selector)
+        add_template_btn = QPushButton("ADD ELEMENT")
+        add_template_btn.clicked.connect(self.add_template_element)
+        selector_row.addWidget(add_template_btn)
+        selector_col.addLayout(selector_row)
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(6)
+        self.custom_name_edit = QLineEdit()
+        self.custom_name_edit.setPlaceholderText("Custom element key (e.g., reference)")
+        self.custom_desc_edit = QLineEdit()
+        self.custom_desc_edit.setPlaceholderText("AI guidance for this element")
+        custom_add_btn = QPushButton("ADD CUSTOM ELEMENT")
+        custom_add_btn.clicked.connect(self.add_custom_element_from_inputs)
+        custom_row.addWidget(self.custom_name_edit)
+        custom_row.addWidget(self.custom_desc_edit)
+        custom_row.addWidget(custom_add_btn)
+        selector_col.addLayout(custom_row)
+        template_layout.addLayout(selector_col)
+
+        template_builder = QHBoxLayout()
+        template_builder.setSpacing(6)
+        self.template_list = QListWidget()
+        self.template_list.setSelectionMode(
+            self.template_list.SelectionMode.SingleSelection
+        )
+        self.template_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.template_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.template_list.model().rowsMoved.connect(lambda *_: self.update_preview())
+        for element in DEFAULT_TEMPLATE_ELEMENTS:
+            self.add_template_item(element, refresh=False)
+        self.update_preview()
+        template_builder.addWidget(self.template_list)
+
+        buttons_col = QVBoxLayout()
+        buttons_col.setSpacing(6)
+        remove_btn = QPushButton("REMOVE")
+        remove_btn.clicked.connect(self.remove_selected_template_element)
+        buttons_col.addWidget(remove_btn)
+        buttons_col.addStretch()
+        template_builder.addLayout(buttons_col)
+
+        template_layout.addLayout(template_builder)
+        template_group.setLayout(template_layout)
+        rename_settings_layout.addWidget(template_group)
 
         distribution_group = Card("DISTRIBUTION SETTINGS")
         distribution_layout = QVBoxLayout()
@@ -540,7 +597,6 @@ class RenamerGUI(QMainWindow):
         auto_threshold_col.addWidget(QLabel("Auto threshold (score):"))
         self.distribution_auto_threshold_spin = QSpinBox()
         self.distribution_auto_threshold_spin.setRange(0, 200)
-        # Conservative defaults: favor surname+given-name alignment while keeping auto-accept cautious.
         self.distribution_auto_threshold_spin.setValue(60)
         auto_threshold_col.addWidget(self.distribution_auto_threshold_spin)
         distribution_layout.addLayout(auto_threshold_col)
@@ -613,73 +669,85 @@ class RenamerGUI(QMainWindow):
         )
         stopwords_col.addWidget(self.distribution_stopwords_edit)
         distribution_layout.addLayout(stopwords_col)
-
         distribution_group.setLayout(distribution_layout)
-        controls_layout.addWidget(distribution_group)
-        controls_layout.addStretch()
-        controls_group.setLayout(controls_layout)
-        self.settings_layout.addWidget(controls_group, 1)
+        distribution_settings_layout.addWidget(distribution_group)
 
-        template_group = Card("FILENAME TEMPLATE")
-        template_layout = QVBoxLayout()
-        template_layout.setSpacing(6)
-        template_layout.setContentsMargins(12, 12, 12, 12)
-
-        selector_col = QVBoxLayout()
-        selector_col.setSpacing(6)
-        selector_col.addWidget(QLabel("Add element:"))
-        selector_row = QHBoxLayout()
-        selector_row.setSpacing(6)
-        self.template_selector = QComboBox()
-        self.template_selector.addItem("Date (today)", "date")
-        self.template_selector.addItem("Plaintiff", "plaintiff")
-        self.template_selector.addItem("Defendant", "defendant")
-        self.template_selector.addItem("Letter type", "letter_type")
-        self.template_selector.addItem("Case number", "case_number")
-        selector_row.addWidget(self.template_selector)
-        add_template_btn = QPushButton("ADD ELEMENT")
-        add_template_btn.clicked.connect(self.add_template_element)
-        selector_row.addWidget(add_template_btn)
-        selector_col.addLayout(selector_row)
-        custom_row = QHBoxLayout()
-        custom_row.setSpacing(6)
-        self.custom_name_edit = QLineEdit()
-        self.custom_name_edit.setPlaceholderText("Custom element key (e.g., reference)")
-        self.custom_desc_edit = QLineEdit()
-        self.custom_desc_edit.setPlaceholderText("AI guidance for this element")
-        custom_add_btn = QPushButton("ADD CUSTOM ELEMENT")
-        custom_add_btn.clicked.connect(self.add_custom_element_from_inputs)
-        custom_row.addWidget(self.custom_name_edit)
-        custom_row.addWidget(self.custom_desc_edit)
-        custom_row.addWidget(custom_add_btn)
-        selector_col.addLayout(custom_row)
-        template_layout.addLayout(selector_col)
-
-        template_builder = QHBoxLayout()
-        template_builder.setSpacing(6)
-        self.template_list = QListWidget()
-        self.template_list.setSelectionMode(
-            self.template_list.SelectionMode.SingleSelection
+        mode_group = Card("MODE")
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
+        self.copy_mode_checkbox.setChecked(True)
+        self.copy_mode_checkbox.setEnabled(False)
+        mode_row.addWidget(self.copy_mode_checkbox)
+        self.allow_home_case_root_checkbox = QCheckBox("Allow case root under home folder")
+        self.allow_home_case_root_checkbox.setToolTip(
+            "Unchecked = extra safety guard. Check only if you want to use a case root inside your home folder."
         )
-        self.template_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.template_list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.template_list.model().rowsMoved.connect(lambda *_: self.update_preview())
-        for element in DEFAULT_TEMPLATE_ELEMENTS:
-            self.add_template_item(element, refresh=False)
-        self.update_preview()
-        template_builder.addWidget(self.template_list)
+        mode_row.addWidget(self.allow_home_case_root_checkbox)
+        self.auto_apply_checkbox = QCheckBox("Auto apply high-confidence only")
+        self.auto_apply_checkbox.setToolTip(
+            "Apply only AUTO/AI items that meet confidence thresholds."
+        )
+        mode_row.addWidget(self.auto_apply_checkbox)
+        self.distribution_apply_during_planning_checkbox = QCheckBox(
+            "Apply AUTO matches during planning (fast workflow)"
+        )
+        self.distribution_apply_during_planning_checkbox.setToolTip(
+            "When enabled, AUTO matches are copied immediately while the plan is built."
+        )
+        mode_row.addWidget(self.distribution_apply_during_planning_checkbox)
+        self.distribution_use_ai_tiebreaker_checkbox = QCheckBox(
+            "Use AI tie-breaker for ambiguous matches"
+        )
+        self.distribution_use_ai_tiebreaker_checkbox.setToolTip(
+            "When enabled, AI can pick between close folder matches."
+        )
+        mode_row.addWidget(self.distribution_use_ai_tiebreaker_checkbox)
+        self.distribution_fast_mode_checkbox = QCheckBox("Fast mode (recommended)")
+        self.distribution_fast_mode_checkbox.setToolTip(
+            "Uses smaller candidate pools and skips expensive similarity work when no pair match."
+        )
+        self.distribution_fast_mode_checkbox.setChecked(True)
+        mode_row.addWidget(self.distribution_fast_mode_checkbox)
+        mode_row.addStretch()
+        mode_group.setLayout(mode_row)
+        distribution_settings_layout.addWidget(mode_group)
 
-        buttons_col = QVBoxLayout()
-        buttons_col.setSpacing(6)
-        remove_btn = QPushButton("REMOVE")
-        remove_btn.clicked.connect(self.remove_selected_template_element)
-        buttons_col.addWidget(remove_btn)
-        buttons_col.addStretch()
-        template_builder.addLayout(buttons_col)
+        unresolved_group = Card("UNRESOLVED HANDLING")
+        unresolved_layout = QVBoxLayout()
+        unresolved_layout.setSpacing(6)
+        self.distribution_create_unresolved_checkbox = QCheckBox(
+            "Create new folder for unresolved files"
+        )
+        self.distribution_create_unresolved_checkbox.setToolTip(
+            "When enabled, unresolved files can be routed into newly created case folders."
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_checkbox)
+        unresolved_scope_row = QHBoxLayout()
+        unresolved_scope_row.setSpacing(6)
+        unresolved_scope_row.addWidget(QLabel("Create folder for:"))
+        self.distribution_create_unresolved_scope_combo = QComboBox()
+        self.distribution_create_unresolved_scope_combo.addItem(
+            "UNMATCHED only", "unmatched_only"
+        )
+        self.distribution_create_unresolved_scope_combo.addItem(
+            "UNMATCHED + unresolved ASK", "unmatched_and_ask"
+        )
+        unresolved_scope_row.addWidget(self.distribution_create_unresolved_scope_combo)
+        unresolved_layout.addLayout(unresolved_scope_row)
+        self.distribution_create_unresolved_case_checkbox = QCheckBox(
+            "Include case number/tag in created folder name"
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_case_checkbox)
+        self.distribution_create_unresolved_dry_run_checkbox = QCheckBox(
+            "Dry-run folder creation (log only)"
+        )
+        unresolved_layout.addWidget(self.distribution_create_unresolved_dry_run_checkbox)
+        unresolved_group.setLayout(unresolved_layout)
+        distribution_settings_layout.addWidget(unresolved_group)
 
-        template_layout.addLayout(template_builder)
-        template_group.setLayout(template_layout)
-        self.settings_layout.addWidget(template_group, 1)
+        rename_settings_layout.addStretch()
+        distribution_settings_layout.addStretch()
 
         # Distribution page (Page 2)
         self.distribution_scroll_area = QScrollArea()
@@ -727,79 +795,6 @@ class RenamerGUI(QMainWindow):
         dist_paths_group.setLayout(dist_frame_layout)
         self.distribution_layout.addWidget(dist_paths_group)
 
-        mode_group = Card("MODE")
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(6)
-        self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
-        self.copy_mode_checkbox.setChecked(True)
-        self.copy_mode_checkbox.setEnabled(False)
-        mode_row.addWidget(self.copy_mode_checkbox)
-        self.allow_home_case_root_checkbox = QCheckBox("Allow case root under home folder")
-        self.allow_home_case_root_checkbox.setToolTip(
-            "Unchecked = extra safety guard. Check only if you want to use a case root inside your home folder."
-        )
-        mode_row.addWidget(self.allow_home_case_root_checkbox)
-        self.auto_apply_checkbox = QCheckBox("Auto apply high-confidence only")
-        self.auto_apply_checkbox.setToolTip(
-            "Apply only AUTO/AI items that meet confidence thresholds."
-        )
-        mode_row.addWidget(self.auto_apply_checkbox)
-        self.distribution_apply_during_planning_checkbox = QCheckBox(
-            "Apply AUTO matches during planning (fast workflow)"
-        )
-        self.distribution_apply_during_planning_checkbox.setToolTip(
-            "When enabled, AUTO matches are copied immediately while the plan is built."
-        )
-        mode_row.addWidget(self.distribution_apply_during_planning_checkbox)
-        self.distribution_use_ai_tiebreaker_checkbox = QCheckBox(
-            "Use AI tie-breaker for ambiguous matches"
-        )
-        self.distribution_use_ai_tiebreaker_checkbox.setToolTip(
-            "When enabled, AI can pick between close folder matches."
-        )
-        mode_row.addWidget(self.distribution_use_ai_tiebreaker_checkbox)
-        self.distribution_fast_mode_checkbox = QCheckBox("Fast mode (recommended)")
-        self.distribution_fast_mode_checkbox.setToolTip(
-            "Uses smaller candidate pools and skips expensive similarity work when no pair match."
-        )
-        self.distribution_fast_mode_checkbox.setChecked(True)
-        mode_row.addWidget(self.distribution_fast_mode_checkbox)
-        mode_row.addStretch()
-        mode_group.setLayout(mode_row)
-        self.distribution_layout.addWidget(mode_group)
-
-        unresolved_group = Card("UNRESOLVED HANDLING")
-        unresolved_layout = QVBoxLayout()
-        unresolved_layout.setSpacing(6)
-        self.distribution_create_unresolved_checkbox = QCheckBox(
-            "Create new folder for unresolved files"
-        )
-        self.distribution_create_unresolved_checkbox.setToolTip(
-            "When enabled, unresolved files can be routed into newly created case folders."
-        )
-        unresolved_layout.addWidget(self.distribution_create_unresolved_checkbox)
-        unresolved_scope_row = QHBoxLayout()
-        unresolved_scope_row.setSpacing(6)
-        unresolved_scope_row.addWidget(QLabel("Create folder for:"))
-        self.distribution_create_unresolved_scope_combo = QComboBox()
-        self.distribution_create_unresolved_scope_combo.addItem(
-            "UNMATCHED only", "unmatched_only"
-        )
-        self.distribution_create_unresolved_scope_combo.addItem(
-            "UNMATCHED + unresolved ASK", "unmatched_and_ask"
-        )
-        unresolved_scope_row.addWidget(self.distribution_create_unresolved_scope_combo)
-        unresolved_layout.addLayout(unresolved_scope_row)
-        self.distribution_create_unresolved_case_checkbox = QCheckBox(
-            "Include case number/tag in created folder name"
-        )
-        unresolved_layout.addWidget(self.distribution_create_unresolved_case_checkbox)
-        self.distribution_create_unresolved_dry_run_checkbox = QCheckBox(
-            "Dry-run folder creation (log only)"
-        )
-        unresolved_layout.addWidget(self.distribution_create_unresolved_dry_run_checkbox)
-        unresolved_group.setLayout(unresolved_layout)
-        self.distribution_layout.addWidget(unresolved_group)
 
         dist_controls_group = Card("EXECUTION")
         dist_controls = QHBoxLayout()
@@ -910,22 +905,6 @@ class RenamerGUI(QMainWindow):
         plan_group.setLayout(plan_layout)
         self.distribution_layout.addWidget(plan_group)
 
-        log_group = Card("DISTRIBUTION LOG")
-        log_layout = QVBoxLayout()
-        log_layout.setSpacing(6)
-        log_layout.setContentsMargins(12, 12, 12, 12)
-        self.distribution_log_view = QTextEdit()
-        self.distribution_log_view.setReadOnly(True)
-        self.distribution_log_view.setPlaceholderText(
-            "Processing details will appear here. Copies are logged to disk as well."
-        )
-        self.distribution_log_view.setMaximumHeight(170)
-        self.distribution_log_view.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        log_layout.addWidget(self.distribution_log_view)
-        log_group.setLayout(log_layout)
-        self.distribution_layout.addWidget(log_group)
 
         # Status bar
         self.status_bar = QStatusBar()
@@ -983,16 +962,18 @@ class RenamerGUI(QMainWindow):
             self.subtitle_label.setText(self.tr("Smart document naming"))
         if hasattr(self, "rename_mode_button"):
             self.rename_mode_button.setText(self.tr("Rename"))
-            self.filename_mode_button.setText(self.tr("Template"))
-            self.distribute_mode_button.setText(self.tr("Distribution"))
-            self.logs_mode_button.setText(self.tr("Logs"))
+            self.distribute_mode_button.setText(self.tr("Distribute"))
             self.settings_mode_button.setText(self.tr("Settings"))
+            self.logs_mode_button.setText(self.tr("Logs"))
         if hasattr(self, "status_label"):
             self.status_label.setText(self.tr("Waiting for input…"))
         if hasattr(self, "language_label"):
             self.language_label.setText(self.tr("Language:"))
         if hasattr(self, "backend_combo"):
             self.update_backend_status_label()
+        if hasattr(self, "settings_tabs"):
+            self.settings_tabs.setTabText(0, self.tr("Rename Settings"))
+            self.settings_tabs.setTabText(1, self.tr("Distribution Settings"))
 
     # ------------------------------------------------------
     # UI helpers
@@ -1020,7 +1001,7 @@ class RenamerGUI(QMainWindow):
         if index < 0 or index >= self.content_stack.count():
             return
         self.content_stack.setCurrentIndex(index)
-        mode_names = [self.tr("Rename"), self.tr("Filename Rules"), self.tr("Distribute"), self.tr("Logs")]
+        mode_names = [self.tr("Rename"), self.tr("Distribute"), self.tr("Settings"), self.tr("Logs")]
         selected_mode = mode_names[index] if index < len(mode_names) else f"Mode {index}"
         self.append_status_message(f"[MODE] Switched to {selected_mode}")
 
@@ -1045,8 +1026,12 @@ class RenamerGUI(QMainWindow):
         defendant_order = self.settings.value("defendant_surname_first", default_order)
         plaintiff_order_bool = str(plaintiff_order).lower() == "true"
         defendant_order_bool = str(defendant_order).lower() == "true"
-        self.plaintiff_order_combo.setCurrentIndex(0 if plaintiff_order_bool else 1)
-        self.defendant_order_combo.setCurrentIndex(0 if defendant_order_bool else 1)
+        if defendant_order_bool and not plaintiff_order_bool:
+            self.party_order_combo.setCurrentIndex(0)
+        elif plaintiff_order_bool and not defendant_order_bool:
+            self.party_order_combo.setCurrentIndex(1)
+        else:
+            self.party_order_combo.setCurrentIndex(0)
         auto_threshold = self.settings.value("distribution_auto_threshold", 60)
         gap_threshold = self.settings.value("distribution_gap_threshold", 12)
         ai_threshold = self.settings.value("distribution_ai_threshold", 0.7)
@@ -1147,12 +1132,11 @@ class RenamerGUI(QMainWindow):
         self.settings.setValue("template", self.get_template_elements())
         self.settings.setValue("turbo_mode", self.turbo_mode_checkbox.isChecked())
         self.settings.setValue("custom_elements", json.dumps(self.custom_elements))
-        self.settings.setValue(
-            "plaintiff_surname_first", bool(self.plaintiff_order_combo.currentData())
-        )
-        self.settings.setValue(
-            "defendant_surname_first", bool(self.defendant_order_combo.currentData())
-        )
+        party_order = str(self.party_order_combo.currentData())
+        plaintiff_surname_first = party_order == "plaintiff_defendant"
+        defendant_surname_first = party_order == "defendant_plaintiff"
+        self.settings.setValue("plaintiff_surname_first", plaintiff_surname_first)
+        self.settings.setValue("defendant_surname_first", defendant_surname_first)
         self.settings.setValue(
             "distribution_auto_threshold", self.distribution_auto_threshold_spin.value()
         )
@@ -1222,18 +1206,14 @@ class RenamerGUI(QMainWindow):
         self.append_status_message(message)
 
     def append_status_message(self, message: str):
-        if not hasattr(self, "status_log"):
+        if not hasattr(self, "logs_page_view"):
             return
         stamp = datetime.now().strftime("%H:%M:%S")
         formatted = f"[{stamp}] {message}"
-        self.status_log.appendPlainText(formatted)
-        if hasattr(self, "logs_page_view"):
-            self.logs_page_view.appendPlainText(formatted)
-        self.status_log.verticalScrollBar().setValue(self.status_log.verticalScrollBar().maximum())
-        if hasattr(self, "logs_page_view"):
-            self.logs_page_view.verticalScrollBar().setValue(
-                self.logs_page_view.verticalScrollBar().maximum()
-            )
+        self.logs_page_view.appendPlainText(formatted)
+        self.logs_page_view.verticalScrollBar().setValue(
+            self.logs_page_view.verticalScrollBar().maximum()
+        )
 
     def set_status(self, text: str):
         if not text:
@@ -1382,7 +1362,7 @@ class RenamerGUI(QMainWindow):
 
     def append_distribution_log_message(self, message: str):
         if message:
-            self.distribution_log_view.append(message)
+            self.distribution_log_view.appendPlainText(message)
             append_distribution_log(message)
             self.append_status_message(message)
 
@@ -2163,8 +2143,8 @@ class RenamerGUI(QMainWindow):
             ocr_char_limit=self.char_limit_spin.value(),
             ocr_dpi=self.ocr_dpi_spin.value(),
             ocr_pages=self.ocr_pages_spin.value(),
-            plaintiff_surname_first=bool(self.plaintiff_order_combo.currentData()),
-            defendant_surname_first=bool(self.defendant_order_combo.currentData()),
+            plaintiff_surname_first=str(self.party_order_combo.currentData()) == "plaintiff_defendant",
+            defendant_surname_first=str(self.party_order_combo.currentData()) == "defendant_plaintiff",
             turbo_mode=self.turbo_mode_checkbox.isChecked(),
         )
 
