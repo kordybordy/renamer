@@ -45,6 +45,7 @@ from app_workers import (
     FileProcessWorker,
     NamingOptions,
 )
+from ui_components import Card, SidebarButton, TopBarIconButton
 
 
 def log_filesystem_action(operation: str, source: str, destination: str, status: str) -> None:
@@ -83,15 +84,23 @@ class RenamerGUI(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        root_layout = QVBoxLayout()
-        root_layout.setContentsMargins(12, 12, 12, 12)
-        root_layout.setSpacing(12)
+        root_layout = QHBoxLayout()
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(16)
         central_widget.setLayout(root_layout)
 
-        header_frame = QFrame()
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(6, 6, 6, 6)
-        header_layout.setSpacing(6)
+        self.sidebar_frame = QFrame()
+        self.sidebar_frame.setObjectName("Sidebar")
+        self.sidebar_frame.setFixedWidth(220)
+        sidebar_layout = QVBoxLayout()
+        sidebar_layout.setContentsMargins(12, 12, 12, 12)
+        sidebar_layout.setSpacing(8)
+
+        brand_frame = QFrame()
+        brand_frame.setObjectName("SidebarBrand")
+        brand_layout = QHBoxLayout()
+        brand_layout.setContentsMargins(8, 8, 8, 8)
+        brand_layout.setSpacing(8)
         logo_path = None
         for candidate in ("logo-32.png", "logo-square.png", "logo.png"):
             candidate_path = os.path.join(BASE_DIR, "assets", candidate)
@@ -104,54 +113,102 @@ class RenamerGUI(QMainWindow):
             logo_label.setPixmap(
                 pixmap.scaled(QSize(32, 32), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
-            header_layout.addWidget(logo_label)
+            brand_layout.addWidget(logo_label)
         title_col = QVBoxLayout()
         title_col.setSpacing(4)
-        title_label = QLabel("[R] Renamer")
+        title_label = QLabel("Renamer")
         title_label.setObjectName("TitleLabel")
         subtitle_label = QLabel("Smart document naming")
         subtitle_label.setObjectName("Subtitle")
         title_col.addWidget(title_label)
         title_col.addWidget(subtitle_label)
-        header_layout.addLayout(title_col)
-        header_layout.addStretch()
-        header_frame.setLayout(header_layout)
-        root_layout.addWidget(header_frame)
+        brand_layout.addLayout(title_col)
+        brand_layout.addStretch()
+        brand_frame.setLayout(brand_layout)
+        sidebar_layout.addWidget(brand_frame)
 
-        mode_bar = QFrame()
-        mode_bar_layout = QHBoxLayout()
-        mode_bar_layout.setContentsMargins(0, 0, 0, 0)
-        mode_bar_layout.setSpacing(6)
         self.mode_buttons = QButtonGroup(self)
         self.mode_buttons.setExclusive(True)
         self.mode_buttons.idClicked.connect(self.on_mode_changed)
 
-        self.rename_mode_button = QPushButton("RENAME")
-        self.rename_mode_button.setCheckable(True)
-        self.filename_mode_button = QPushButton("FILENAME RULES")
-        self.filename_mode_button.setCheckable(True)
-        self.distribute_mode_button = QPushButton("DISTRIBUTE")
-        self.distribute_mode_button.setCheckable(True)
+        icon_dir = os.path.join(BASE_DIR, "assets", "icons")
+        self.rename_mode_button = SidebarButton("Rename", os.path.join(icon_dir, "rename.svg"))
+        self.filename_mode_button = SidebarButton("Template", os.path.join(icon_dir, "template.svg"))
+        self.distribute_mode_button = SidebarButton("Distribution", os.path.join(icon_dir, "distribution.svg"))
+        self.logs_mode_button = SidebarButton("Logs", os.path.join(icon_dir, "logs.svg"))
+        self.settings_mode_button = SidebarButton("Settings", os.path.join(icon_dir, "settings.svg"))
+        self.settings_mode_button.setEnabled(False)
 
         for idx, btn in enumerate(
-            (self.rename_mode_button, self.filename_mode_button, self.distribute_mode_button)
+            (
+                self.rename_mode_button,
+                self.filename_mode_button,
+                self.distribute_mode_button,
+                self.logs_mode_button,
+            )
         ):
-            btn.setObjectName("ModeButton")
             self.mode_buttons.addButton(btn, idx)
-            mode_bar_layout.addWidget(btn)
-        mode_bar_layout.addStretch()
-        mode_bar.setLayout(mode_bar_layout)
-        root_layout.addWidget(mode_bar)
+            sidebar_layout.addWidget(btn)
+
+        sidebar_layout.addWidget(self.settings_mode_button)
+        sidebar_layout.addStretch()
+        self.sidebar_frame.setLayout(sidebar_layout)
+        root_layout.addWidget(self.sidebar_frame)
+
+        right_container = QFrame()
+        right_container.setObjectName("ContentRoot")
+        right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        top_bar = QFrame()
+        top_bar.setObjectName("TopBar")
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(12, 10, 12, 10)
+        top_layout.setSpacing(8)
+        self.top_search_edit = QLineEdit()
+        self.top_search_edit.setObjectName("TopSearch")
+        self.top_search_edit.setPlaceholderText("Search files, cases, or logs")
+        top_layout.addWidget(self.top_search_edit, 1)
+        self.top_new_button = QPushButton("+ New")
+        self.top_new_button.setObjectName("PrimaryButton")
+        self.top_new_button.clicked.connect(self.choose_input)
+        top_layout.addWidget(self.top_new_button)
+        self.top_bell_button = TopBarIconButton("•")
+        self.top_user_button = TopBarIconButton("◦")
+        top_layout.addWidget(self.top_bell_button)
+        top_layout.addWidget(self.top_user_button)
+        top_bar.setLayout(top_layout)
+        right_layout.addWidget(top_bar)
 
         self.content_stack = QStackedWidget()
-        root_layout.addWidget(self.content_stack, 1)
+        right_layout.addWidget(self.content_stack, 1)
+        right_container.setLayout(right_layout)
+        root_layout.addWidget(right_container, 1)
 
         self.main_page = QWidget()
         self.settings_page = QWidget()
         self.distribution_page = QWidget()
+        self.logs_page = QWidget()
         self.content_stack.addWidget(self.main_page)
         self.content_stack.addWidget(self.settings_page)
         self.content_stack.addWidget(self.distribution_page)
+        self.content_stack.addWidget(self.logs_page)
+
+        logs_page_layout = QVBoxLayout()
+        logs_page_layout.setContentsMargins(0, 0, 0, 0)
+        logs_page_layout.setSpacing(0)
+        logs_card = Card("STATUS LOG")
+        logs_layout = QVBoxLayout()
+        logs_layout.setSpacing(8)
+        self.logs_page_view = QPlainTextEdit()
+        self.logs_page_view.setReadOnly(True)
+        self.logs_page_view.setPlaceholderText("Status messages appear here")
+        self.logs_page_view.setObjectName("StatusLog")
+        logs_layout.addWidget(self.logs_page_view)
+        logs_card.setLayout(logs_layout)
+        logs_page_layout.addWidget(logs_card)
+        self.logs_page.setLayout(logs_page_layout)
 
         def build_collapsible_section(title: str, body: QWidget, collapsed: bool = True) -> QWidget:
             container = QFrame()
@@ -193,7 +250,7 @@ class RenamerGUI(QMainWindow):
         main_page_layout.addWidget(self.main_scroll_area)
         self.main_page.setLayout(main_page_layout)
 
-        io_group = QGroupBox("PATHS")
+        io_group = Card("PATHS")
         io_layout = QVBoxLayout()
         io_layout.setSpacing(6)
         io_layout.setContentsMargins(12, 12, 12, 12)
@@ -233,7 +290,7 @@ class RenamerGUI(QMainWindow):
         io_group.setLayout(io_layout)
         self.main_layout.addWidget(io_group)
 
-        action_group = QGroupBox("COMMAND")
+        action_group = Card("COMMAND")
         action_layout = QHBoxLayout()
         action_layout.setSpacing(6)
         action_layout.setContentsMargins(12, 12, 12, 12)
@@ -252,7 +309,7 @@ class RenamerGUI(QMainWindow):
         action_group.setLayout(action_layout)
         self.main_layout.addWidget(action_group)
 
-        table_group = QGroupBox("FILES")
+        table_group = Card("FILES")
         table_layout = QVBoxLayout()
         table_layout.setSpacing(6)
         table_layout.setContentsMargins(12, 12, 12, 12)
@@ -268,7 +325,7 @@ class RenamerGUI(QMainWindow):
         table_group.setLayout(table_layout)
         self.main_layout.addWidget(table_group)
 
-        preview_group = QGroupBox("FILENAME")
+        preview_group = Card("FILENAME")
         preview_layout = QVBoxLayout()
         preview_layout.setSpacing(6)
         preview_layout.setContentsMargins(12, 12, 12, 12)
@@ -282,7 +339,7 @@ class RenamerGUI(QMainWindow):
         preview_group.setLayout(preview_layout)
         self.main_layout.addWidget(preview_group)
 
-        ocr_group = QGroupBox("")
+        ocr_group = Card("")
         ocr_layout = QVBoxLayout()
         ocr_layout.setSpacing(6)
         ocr_layout.setContentsMargins(12, 12, 12, 12)
@@ -298,7 +355,7 @@ class RenamerGUI(QMainWindow):
         ocr_group.setLayout(ocr_layout)
         self.main_layout.addWidget(build_collapsible_section("OCR EXCERPT", ocr_group, collapsed=True))
 
-        log_group = QGroupBox("")
+        log_group = Card("")
         log_layout = QVBoxLayout()
         log_layout.setSpacing(6)
         log_layout.setContentsMargins(12, 12, 12, 12)
@@ -311,7 +368,7 @@ class RenamerGUI(QMainWindow):
         log_group.setLayout(log_layout)
         self.main_layout.addWidget(build_collapsible_section("STATUS LOG", log_group, collapsed=True))
 
-        bottom_group = QGroupBox("ACTIONS")
+        bottom_group = Card("ACTIONS")
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(6)
         bottom_layout.setContentsMargins(12, 12, 12, 12)
@@ -347,12 +404,12 @@ class RenamerGUI(QMainWindow):
         settings_page_layout.addWidget(self.settings_scroll_area)
         self.settings_page.setLayout(settings_page_layout)
 
-        controls_group = QGroupBox("AI + OCR")
+        controls_group = Card("AI + OCR")
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(12)
         controls_layout.setContentsMargins(12, 12, 12, 12)
 
-        ocr_group = QGroupBox("OCR SETTINGS")
+        ocr_group = Card("OCR SETTINGS")
         ocr_layout = QVBoxLayout()
         ocr_layout.setSpacing(6)
         self.run_ocr_checkbox = QCheckBox("Run OCR")
@@ -396,7 +453,7 @@ class RenamerGUI(QMainWindow):
         ocr_group.setLayout(ocr_layout)
         controls_layout.addWidget(ocr_group)
 
-        ai_group = QGroupBox("AI ENGINE")
+        ai_group = Card("AI ENGINE")
         ai_layout = QVBoxLayout()
         ai_layout.setSpacing(6)
         backend_col = QVBoxLayout()
@@ -430,7 +487,7 @@ class RenamerGUI(QMainWindow):
         ai_group.setLayout(ai_layout)
         controls_layout.addWidget(ai_group)
 
-        order_group = QGroupBox("NAME ORDER")
+        order_group = Card("NAME ORDER")
         order_layout = QVBoxLayout()
         order_layout.setSpacing(6)
         plaintiff_col = QVBoxLayout()
@@ -455,7 +512,7 @@ class RenamerGUI(QMainWindow):
         order_group.setLayout(order_layout)
         controls_layout.addWidget(order_group)
 
-        distribution_group = QGroupBox("DISTRIBUTION SETTINGS")
+        distribution_group = Card("DISTRIBUTION SETTINGS")
         distribution_layout = QVBoxLayout()
         distribution_layout.setSpacing(6)
 
@@ -544,7 +601,7 @@ class RenamerGUI(QMainWindow):
         controls_group.setLayout(controls_layout)
         self.settings_layout.addWidget(controls_group, 1)
 
-        template_group = QGroupBox("FILENAME TEMPLATE")
+        template_group = Card("FILENAME TEMPLATE")
         template_layout = QVBoxLayout()
         template_layout.setSpacing(6)
         template_layout.setContentsMargins(12, 12, 12, 12)
@@ -619,7 +676,7 @@ class RenamerGUI(QMainWindow):
         distribution_page_layout.addWidget(self.distribution_scroll_area)
         self.distribution_page.setLayout(distribution_page_layout)
 
-        dist_paths_group = QGroupBox("DISTRIBUTION PATHS")
+        dist_paths_group = Card("DISTRIBUTION PATHS")
         dist_frame_layout = QVBoxLayout()
         dist_frame_layout.setSpacing(6)
         dist_frame_layout.setContentsMargins(12, 12, 12, 12)
@@ -651,7 +708,7 @@ class RenamerGUI(QMainWindow):
         dist_paths_group.setLayout(dist_frame_layout)
         self.distribution_layout.addWidget(dist_paths_group)
 
-        mode_group = QGroupBox("MODE")
+        mode_group = Card("MODE")
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
         self.copy_mode_checkbox = QCheckBox("Copy files (default, mandatory)")
@@ -692,7 +749,7 @@ class RenamerGUI(QMainWindow):
         mode_group.setLayout(mode_row)
         self.distribution_layout.addWidget(mode_group)
 
-        unresolved_group = QGroupBox("UNRESOLVED HANDLING")
+        unresolved_group = Card("UNRESOLVED HANDLING")
         unresolved_layout = QVBoxLayout()
         unresolved_layout.setSpacing(6)
         self.distribution_create_unresolved_checkbox = QCheckBox(
@@ -725,7 +782,7 @@ class RenamerGUI(QMainWindow):
         unresolved_group.setLayout(unresolved_layout)
         self.distribution_layout.addWidget(unresolved_group)
 
-        dist_controls_group = QGroupBox("EXECUTION")
+        dist_controls_group = Card("EXECUTION")
         dist_controls = QHBoxLayout()
         dist_controls.setSpacing(6)
         self.distribution_status_label = QLabel("Idle")
@@ -751,7 +808,7 @@ class RenamerGUI(QMainWindow):
         dist_controls_group.setLayout(dist_controls)
         self.distribution_layout.addWidget(dist_controls_group)
 
-        plan_group = QGroupBox("DISTRIBUTION PLAN")
+        plan_group = Card("DISTRIBUTION PLAN")
         plan_layout = QVBoxLayout()
         plan_layout.setSpacing(6)
         plan_layout.setContentsMargins(12, 12, 12, 12)
@@ -834,7 +891,7 @@ class RenamerGUI(QMainWindow):
         plan_group.setLayout(plan_layout)
         self.distribution_layout.addWidget(plan_group)
 
-        log_group = QGroupBox("DISTRIBUTION LOG")
+        log_group = Card("DISTRIBUTION LOG")
         log_layout = QVBoxLayout()
         log_layout.setSpacing(6)
         log_layout.setContentsMargins(12, 12, 12, 12)
@@ -904,7 +961,9 @@ class RenamerGUI(QMainWindow):
         if index < 0 or index >= self.content_stack.count():
             return
         self.content_stack.setCurrentIndex(index)
-        self.append_status_message(f"[MODE] Switched to {['Rename', 'Filename Rules', 'Distribute'][index]}")
+        mode_names = ["Rename", "Filename Rules", "Distribute", "Logs"]
+        selected_mode = mode_names[index] if index < len(mode_names) else f"Mode {index}"
+        self.append_status_message(f"[MODE] Switched to {selected_mode}")
 
     def update_backend_status_label(self):
         if not hasattr(self, "backend_combo"):
@@ -1099,8 +1158,15 @@ class RenamerGUI(QMainWindow):
         if not hasattr(self, "status_log"):
             return
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.status_log.appendPlainText(f"[{stamp}] {message}")
+        formatted = f"[{stamp}] {message}"
+        self.status_log.appendPlainText(formatted)
+        if hasattr(self, "logs_page_view"):
+            self.logs_page_view.appendPlainText(formatted)
         self.status_log.verticalScrollBar().setValue(self.status_log.verticalScrollBar().maximum())
+        if hasattr(self, "logs_page_view"):
+            self.logs_page_view.verticalScrollBar().setValue(
+                self.logs_page_view.verticalScrollBar().maximum()
+            )
 
     def set_status(self, text: str):
         if not text:

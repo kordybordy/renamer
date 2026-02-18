@@ -18,6 +18,8 @@ pyinstaller ^
   --name Renamer ^
   --icon "assets/logo.ico" ^
   --add-data "assets;assets" ^
+  --add-data "modern.qss;." ^
+  --add-data "retro.qss;." ^
   --add-data "poppler;poppler" ^
   --add-data "tesseract;tesseract" ^
   main.py

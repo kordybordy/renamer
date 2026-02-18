@@ -6,10 +6,12 @@ from app_runtime import BASE_DIR
 
 
 def load_stylesheet() -> str:
-    retro_path = os.path.join(BASE_DIR, "retro.qss")
-    if os.path.exists(retro_path):
+    for filename in ("modern.qss", "retro.qss"):
+        style_path = os.path.join(BASE_DIR, filename)
+        if not os.path.exists(style_path):
+            continue
         try:
-            with open(retro_path, "r", encoding="utf-8") as f:
+            with open(style_path, "r", encoding="utf-8") as f:
                 return f.read()
         except Exception as e:
             log_exception(e)
