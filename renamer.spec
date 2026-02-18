@@ -11,6 +11,7 @@ a = Analysis(
         ('tesseract', 'tesseract'),
         ('modern.qss', '.'),
         ('retro.qss', '.'),
+        ('translations', 'translations'),
     ],
     hiddenimports=[],
     hookspath=[],
