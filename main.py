@@ -963,7 +963,7 @@ class RenamerGUI(QMainWindow):
             self.filename_edit,
             self.ocr_preview,
             self.backend_combo,
-            self.template_dropdown,
+            self.template_selector,
         ]
         for current, nxt in zip(tab_chain, tab_chain[1:]):
             QWidget.setTabOrder(current, nxt)
