@@ -38,15 +38,28 @@ def _compile_stylesheet(stylesheet: str, tokens: dict[str, str]) -> str:
     return TOKEN_PATTERN.sub(_replace, stylesheet)
 
 
+def _find_unresolved_tokens(stylesheet: str) -> list[str]:
+    return sorted({match.group(1) for match in TOKEN_PATTERN.finditer(stylesheet)})
+
+
 def load_stylesheet() -> str:
     style_path = os.path.join(BASE_DIR, "modern.qss")
     if os.path.exists(style_path):
         try:
             with open(style_path, "r", encoding="utf-8") as f:
                 stylesheet = f.read()
-            if filename == "modern.qss":
+            if os.path.basename(style_path) == "modern.qss":
                 tokens = _load_theme_tokens("modern")
-                return _compile_stylesheet(stylesheet, tokens)
+                compiled_stylesheet = _compile_stylesheet(stylesheet, tokens)
+                unresolved_tokens = _find_unresolved_tokens(compiled_stylesheet)
+                if unresolved_tokens:
+                    log_exception(
+                        ValueError(
+                            "Missing theme tokens for modern.qss: "
+                            + ", ".join(unresolved_tokens)
+                        )
+                    )
+                return compiled_stylesheet
             return stylesheet
         except Exception as e:
             log_exception(e)
