@@ -109,7 +109,7 @@ class RenamerGUI(QMainWindow):
         sidebar_layout.setSpacing(8)
 
         language_flags_row = QHBoxLayout()
-        language_flags_row.setContentsMargins(8, 4, 8, 0)
+        language_flags_row.setContentsMargins(0, 0, 0, 0)
         language_flags_row.setSpacing(6)
         language_flags_row.addStretch(1)
         self.btn_lang_pl = QToolButton()
@@ -122,7 +122,6 @@ class RenamerGUI(QMainWindow):
             language_flags_row.addWidget(button)
         self.btn_lang_pl.clicked.connect(lambda: self.set_language("pl"))
         self.btn_lang_en.clicked.connect(lambda: self.set_language("en"))
-        sidebar_layout.addLayout(language_flags_row)
 
         brand_frame = QFrame()
         brand_frame.setObjectName("SidebarBrand")
@@ -177,6 +176,8 @@ class RenamerGUI(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
+
+        right_layout.addLayout(language_flags_row)
 
         self.content_stack = QStackedWidget()
         right_layout.addWidget(self.content_stack, 1)
