@@ -150,7 +150,7 @@ class RenamerGUI(QMainWindow):
         if not pixmap.isNull():
             self.logo_label = QLabel()
             self.logo_label.setPixmap(
-                pixmap.scaled(QSize(156, 156), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                pixmap.scaled(QSize(256, 128), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             brand_layout.addWidget(self.logo_label)
@@ -180,6 +180,9 @@ class RenamerGUI(QMainWindow):
             sidebar_layout.addWidget(btn)
 
         sidebar_layout.addStretch()
+        self.copyright_label = QLabel("Copyright – Przemysław Dołęgowski")
+        self.copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sidebar_layout.addWidget(self.copyright_label)
         self.sidebar_frame.setLayout(sidebar_layout)
         root_layout.addWidget(self.sidebar_frame)
 
