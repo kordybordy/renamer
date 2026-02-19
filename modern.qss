@@ -87,12 +87,16 @@ QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit, QSpi
 }
 
 QLineEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTabWidget:focus, QTableView:focus {
-    border: 2px solid #8AA3FF;
-    background-color: #1A2A45;
+    border: 1px solid {{border_focus}};
+    background-color: {{surface_input_focus}};
 }
 
 QPushButton:focus, QToolButton:focus, QCheckBox:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTableWidget:focus, QTabBar::tab:focus {
-    border: 2px solid #8AA3FF;
+    border: 1px solid {{border_focus}};
+}
+
+QTabBar::tab:focus {
+    background-color: {{surface_tab_focus}};
 }
 
 QPushButton {

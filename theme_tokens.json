@@ -15,6 +15,7 @@
     "border_focus": "#8B93FF",
     "border_disabled": "#2F3D5D",
     "accent_selection": "#36518A",
-    "text_disabled": "#8EA0C3"
+    "text_disabled": "#8EA0C3",
+    "surface_tab_focus": "#263A5F"
   }
 }
