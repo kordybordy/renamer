@@ -127,8 +127,8 @@ class RenamerGUI(QMainWindow):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             button.setFixedSize(28, 22)
             language_flags_row.addWidget(button)
-        pl_flag_path = pick_asset("flags/polish_flag.png")
-        en_flag_path = pick_asset("flags/english_flag.png")
+        pl_flag_path = pick_asset("flags/polish_flag.png", "flag_pl.png")
+        en_flag_path = pick_asset("flags/english_flag.png", "flag_en.png")
         if pl_flag_path:
             self.btn_lang_pl.setIcon(QIcon(pl_flag_path))
             self.btn_lang_pl.setIconSize(QSize(24, 16))
