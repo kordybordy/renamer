@@ -82,8 +82,13 @@ QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit, QSpi
     selection-color: #F7FAFF;
 }
 
-QLineEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-    border: 1px solid #6B7DFF;
+QLineEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTabWidget:focus, QTableView:focus {
+    border: 2px solid #8AA3FF;
+    background-color: #1A2A45;
+}
+
+QPushButton:focus, QToolButton:focus, QCheckBox:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTableWidget:focus, QTabBar::tab:focus {
+    border: 2px solid #8AA3FF;
 }
 
 QPushButton {
@@ -161,6 +166,8 @@ QHeaderView::section {
 QTableWidget {
     gridline-color: #1B2A44;
     alternate-background-color: #152238;
+    selection-background-color: #3A5DA1;
+    selection-color: #FFFFFF;
 }
 
 QTableWidget::item {
@@ -169,11 +176,12 @@ QTableWidget::item {
 }
 
 QTableWidget::item:hover {
-    background-color: #243659;
+    background-color: #2A406A;
 }
 
 QTableWidget::item:selected {
-    background-color: #304976;
+    background-color: #3A5DA1;
+    color: #FFFFFF;
 }
 
 QProgressBar {
