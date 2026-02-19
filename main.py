@@ -108,9 +108,25 @@ class RenamerGUI(QMainWindow):
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
         sidebar_layout.setSpacing(8)
 
+        language_flags_row = QHBoxLayout()
+        language_flags_row.setContentsMargins(8, 4, 8, 0)
+        language_flags_row.setSpacing(6)
+        language_flags_row.addStretch(1)
+        self.btn_lang_pl = QToolButton()
+        self.btn_lang_en = QToolButton()
+        for button, label in ((self.btn_lang_pl, "PL"), (self.btn_lang_en, "EN")):
+            button.setText(label)
+            button.setAutoRaise(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setFixedSize(28, 22)
+            language_flags_row.addWidget(button)
+        self.btn_lang_pl.clicked.connect(lambda: self.set_language("pl"))
+        self.btn_lang_en.clicked.connect(lambda: self.set_language("en"))
+        sidebar_layout.addLayout(language_flags_row)
+
         brand_frame = QFrame()
         brand_frame.setObjectName("SidebarBrand")
-        brand_layout = QHBoxLayout()
+        brand_layout = QVBoxLayout()
         brand_layout.setContentsMargins(8, 8, 8, 8)
         brand_layout.setSpacing(8)
         logo_path = None
@@ -125,17 +141,9 @@ class RenamerGUI(QMainWindow):
             self.logo_label.setPixmap(
                 pixmap.scaled(QSize(56, 56), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             brand_layout.addWidget(self.logo_label)
-        title_col = QVBoxLayout()
-        title_col.setSpacing(4)
-        self.title_label = QLabel("Renamer")
-        self.title_label.setObjectName("TitleLabel")
-        self.subtitle_label = QLabel("Smart document naming")
-        self.subtitle_label.setObjectName("Subtitle")
-        title_col.addWidget(self.title_label)
-        title_col.addWidget(self.subtitle_label)
-        brand_layout.addLayout(title_col)
-        brand_layout.addStretch()
+        brand_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_frame.setLayout(brand_layout)
         sidebar_layout.addWidget(brand_frame)
 
@@ -160,21 +168,6 @@ class RenamerGUI(QMainWindow):
             self.mode_buttons.addButton(btn, idx)
             sidebar_layout.addWidget(btn)
 
-        language_flags_row = QHBoxLayout()
-        language_flags_row.setContentsMargins(8, 4, 8, 0)
-        language_flags_row.setSpacing(6)
-        self.btn_lang_pl = QToolButton()
-        self.btn_lang_en = QToolButton()
-        for button, label in ((self.btn_lang_pl, "PL"), (self.btn_lang_en, "EN")):
-            button.setText(label)
-            button.setAutoRaise(True)
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setFixedSize(28, 22)
-            language_flags_row.addWidget(button)
-        language_flags_row.addStretch(1)
-        self.btn_lang_pl.clicked.connect(lambda: self.set_language("pl"))
-        self.btn_lang_en.clicked.connect(lambda: self.set_language("en"))
-        sidebar_layout.addLayout(language_flags_row)
         sidebar_layout.addStretch()
         self.sidebar_frame.setLayout(sidebar_layout)
         root_layout.addWidget(self.sidebar_frame)
@@ -2881,4 +2874,3 @@ if __name__ == "__main__":
     gui.show()
 
     sys.exit(app.exec())
-
