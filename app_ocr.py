@@ -13,6 +13,9 @@ from app_logging import log_info
 from app_runtime import BASE_DIR, PDFTOPPM_EXE
 
 
+TEXT_LAYER_MIN_CHARS = 400
+
+
 def configure_tesseract() -> str:
     tesseract_dir = os.path.join(BASE_DIR, "tesseract")
     tessdata_dir = os.path.join(tesseract_dir, "tessdata")
@@ -76,6 +79,43 @@ def extract_text_ocr(pdf_path: str, char_limit: int, dpi: int, pages: int) -> st
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def extract_text_layer(pdf_path: str, char_limit: int) -> str:
+    pdftotext_exe = os.path.join(os.path.dirname(PDFTOPPM_EXE), "pdftotext.exe")
+    pdftotext_cmd = pdftotext_exe if os.path.exists(pdftotext_exe) else "pdftotext"
+    cmd = [
+        pdftotext_cmd,
+        "-enc",
+        "UTF-8",
+        "-f",
+        "1",
+        "-l",
+        "3",
+        pdf_path,
+        "-",
+    ]
+    kwargs = {
+        "check": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = startupinfo
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        result = subprocess.run(cmd, **kwargs)
+        return (result.stdout or "")[:char_limit].strip()
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        log_info(
+            f"Text-layer extraction unavailable for '{os.path.basename(pdf_path)}': {exc}"
+        )
+        return ""
+
+
 OCR_CACHE: Dict[str, dict] = {}
 OCR_CACHE_LOCK = threading.Lock()
 
@@ -96,6 +136,22 @@ def get_ocr_text(pdf_path: str, char_limit: int, dpi: int, pages: int) -> str:
                 f"(pages={normalized_pages}, dpi={dpi}, char_limit={char_limit})"
             )
             return cached_text
+
+    text_layer = extract_text_layer(pdf_path, char_limit)
+    if len(text_layer) >= TEXT_LAYER_MIN_CHARS:
+        log_info(
+            f"Using text-layer extraction for '{os.path.basename(pdf_path)}' "
+            f"({len(text_layer)} chars, OCR skipped)"
+        )
+        with OCR_CACHE_LOCK:
+            OCR_CACHE[pdf_path] = {
+                "ocr_text": text_layer,
+                "char_limit": max(char_limit, len(text_layer)),
+                "dpi": dpi,
+                "pages": normalized_pages,
+            }
+        return text_layer
+
     text = extract_text_ocr(pdf_path, char_limit, dpi, normalized_pages)
     with OCR_CACHE_LOCK:
         OCR_CACHE[pdf_path] = {
