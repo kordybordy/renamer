@@ -137,18 +137,20 @@ class RenamerGUI(QMainWindow):
         brand_layout.setContentsMargins(8, 8, 8, 8)
         brand_layout.setSpacing(8)
         logo_path = pick_asset(
+            "logo_256x256.png",
+            "logo_128x128.png",
+            "logo_64x64.png",
+            "logo_48x48.png",
             "logo_large_256px.png",
             "logo_large_512px.png",
             "logo_large_1024px.png",
-            "logo_48x48.png",
             "logo_32x32.png",
-            "logo_256x256.png",
         )
         pixmap = QPixmap(logo_path) if logo_path else QPixmap()
         if not pixmap.isNull():
             self.logo_label = QLabel()
             self.logo_label.setPixmap(
-                pixmap.scaled(QSize(180, 64), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                pixmap.scaled(QSize(156, 156), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             brand_layout.addWidget(self.logo_label)
