@@ -1,0 +1,20 @@
+{
+  "modern": {
+    "font_family": "Segoe UI",
+    "text_primary": "#E5ECFF",
+    "text_on_selected": "#F7FAFF",
+    "window_gradient_start": "#0B1220",
+    "window_gradient_end": "#0F1A2A",
+    "surface_sidebar": "#0A1020",
+    "surface_panel": "#121B2E",
+    "surface_input": "#17253D",
+    "surface_input_focus": "#142544",
+    "surface_disabled": "#25324F",
+    "border_default": "#22304A",
+    "border_input": "#2A3C5C",
+    "border_focus": "#8B93FF",
+    "border_disabled": "#2F3D5D",
+    "accent_selection": "#36518A",
+    "text_disabled": "#8EA0C3"
+  }
+}
