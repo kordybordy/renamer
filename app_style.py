@@ -39,10 +39,8 @@ def _compile_stylesheet(stylesheet: str, tokens: dict[str, str]) -> str:
 
 
 def load_stylesheet() -> str:
-    for filename in ("modern.qss", "retro.qss"):
-        style_path = os.path.join(BASE_DIR, filename)
-        if not os.path.exists(style_path):
-            continue
+    style_path = os.path.join(BASE_DIR, "modern.qss")
+    if os.path.exists(style_path):
         try:
             with open(style_path, "r", encoding="utf-8") as f:
                 stylesheet = f.read()

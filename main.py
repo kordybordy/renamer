@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QPlainTextEdit, QToolButton, QScrollArea, QTabWidget, QGridLayout
 )
 from PyQt6.QtCore import Qt, QSize, QSettings, QCoreApplication, QTranslator, QEvent
-from PyQt6.QtGui import QPixmap, QIcon, QPalette, QColor
+from PyQt6.QtGui import QPixmap, QIcon, QColor
 
 from distribution.engine import DistributionConfig
 from distribution.models import DistributionPlanItem
@@ -281,7 +281,7 @@ class RenamerGUI(QMainWindow):
         input_row = QHBoxLayout()
         input_row.setSpacing(6)
         input_row.addWidget(self.input_edit)
-        self.btn_input = QPushButton("BROWSE")
+        self.btn_input = QPushButton("Browse")
         self.btn_input.clicked.connect(self.choose_input)
         input_row.addWidget(self.btn_input)
         input_col.addLayout(input_row)
@@ -295,7 +295,7 @@ class RenamerGUI(QMainWindow):
         output_row = QHBoxLayout()
         output_row.setSpacing(6)
         output_row.addWidget(self.output_edit)
-        self.btn_output = QPushButton("BROWSE")
+        self.btn_output = QPushButton("Browse")
         self.btn_output.clicked.connect(self.choose_output)
         output_row.addWidget(self.btn_output)
         output_col.addLayout(output_row)
@@ -307,22 +307,22 @@ class RenamerGUI(QMainWindow):
         action_layout = QGridLayout()
         action_layout.setSpacing(6)
         action_layout.setContentsMargins(12, 12, 12, 12)
-        self.play_button = QPushButton("SCAN")
+        self.play_button = QPushButton("Scan")
         self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self.start_processing_clicked)
         action_layout.addWidget(self.play_button, 0, 0)
-        self.stop_button = QPushButton("STOP")
+        self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_generation)
         action_layout.addWidget(self.stop_button, 0, 1)
-        self.reset_button = QPushButton("RESET")
+        self.reset_button = QPushButton("Reset")
         self.reset_button.clicked.connect(self.stop_and_reprocess)
         action_layout.addWidget(self.reset_button, 0, 2)
-        btn_process = QPushButton("EXECUTE ONE")
+        btn_process = QPushButton("Execute one")
         btn_process.clicked.connect(self.process_this_file)
         self.btn_process = btn_process
         action_layout.addWidget(btn_process, 1, 0)
 
-        btn_all = QPushButton("EXECUTE ALL")
+        btn_all = QPushButton("Execute all")
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
         action_layout.addWidget(btn_all, 1, 1)
@@ -341,6 +341,7 @@ class RenamerGUI(QMainWindow):
         self.file_table.verticalHeader().setVisible(False)
         self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
         self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
+        self.file_table.setAlternatingRowColors(True)
         self.file_table.cellClicked.connect(self.on_row_selected)
         row_height = self.file_table.verticalHeader().defaultSectionSize()
         header_height = self.file_table.horizontalHeader().height()
@@ -780,7 +781,7 @@ class RenamerGUI(QMainWindow):
         dist_input_row.setSpacing(6)
         self.distribution_input_edit = QLineEdit()
         dist_input_row.addWidget(self.distribution_input_edit)
-        self.distribution_input_button = QPushButton("BROWSE")
+        self.distribution_input_button = QPushButton("Browse")
         self.distribution_input_button.clicked.connect(self.choose_distribution_input)
         dist_input_row.addWidget(self.distribution_input_button)
         dist_input_col.addLayout(dist_input_row)
@@ -793,7 +794,7 @@ class RenamerGUI(QMainWindow):
         dist_cases_row.setSpacing(6)
         self.case_root_edit = QLineEdit()
         dist_cases_row.addWidget(self.case_root_edit)
-        self.case_root_button = QPushButton("BROWSE")
+        self.case_root_button = QPushButton("Browse")
         self.case_root_button.clicked.connect(self.choose_case_root)
         dist_cases_row.addWidget(self.case_root_button)
         dist_cases_col.addLayout(dist_cases_row)
@@ -936,9 +937,36 @@ class RenamerGUI(QMainWindow):
 
         self.apply_window_geometry()
         self.load_settings()
+        self.configure_tab_order()
         self.ui_ready = True
         self.update_preview()
         self.check_ollama_status()
+
+    def configure_tab_order(self):
+        tab_chain = [
+            self.rename_mode_button,
+            self.distribute_mode_button,
+            self.settings_mode_button,
+            self.logs_mode_button,
+            self.btn_lang_pl,
+            self.btn_lang_en,
+            self.input_edit,
+            self.btn_input,
+            self.output_edit,
+            self.btn_output,
+            self.play_button,
+            self.stop_button,
+            self.reset_button,
+            self.btn_process,
+            self.btn_all,
+            self.file_table,
+            self.filename_edit,
+            self.ocr_preview,
+            self.backend_combo,
+            self.template_selector,
+        ]
+        for current, nxt in zip(tab_chain, tab_chain[1:]):
+            QWidget.setTabOrder(current, nxt)
 
     def load_language(self, lang_code: str):
         if lang_code not in SUPPORTED_LANGUAGES:
@@ -990,15 +1018,15 @@ class RenamerGUI(QMainWindow):
             self.io_group.set_title(self.tr("PATHS"))
             self.input_label.setText(self.tr("Input folder:"))
             self.output_label.setText(self.tr("Output folder:"))
-            self.btn_input.setText(self.tr("BROWSE"))
-            self.btn_output.setText(self.tr("BROWSE"))
+            self.btn_input.setText(self.tr("Browse"))
+            self.btn_output.setText(self.tr("Browse"))
         if hasattr(self, "action_group"):
             self.action_group.set_title(self.tr("ACTIONS"))
-            self.play_button.setText(self.tr("SCAN"))
-            self.stop_button.setText(self.tr("STOP"))
-            self.reset_button.setText(self.tr("RESET"))
-            self.btn_process.setText(self.tr("EXECUTE ONE"))
-            self.btn_all.setText(self.tr("EXECUTE ALL"))
+            self.play_button.setText(self.tr("Scan"))
+            self.stop_button.setText(self.tr("Stop"))
+            self.reset_button.setText(self.tr("Reset"))
+            self.btn_process.setText(self.tr("Execute one"))
+            self.btn_all.setText(self.tr("Execute all"))
         if hasattr(self, "table_group"):
             self.table_group.set_title(self.tr("FILES"))
             self.file_table.setHorizontalHeaderLabels([self.tr("PDF file"), self.tr("Proposed filename")])
@@ -1626,6 +1654,7 @@ class RenamerGUI(QMainWindow):
             return
 
         self.file_table.selectRow(0)
+        self.refresh_file_table_states()
 
     # ------------------------------------------------------
     # Distribution helpers
@@ -2354,6 +2383,7 @@ class RenamerGUI(QMainWindow):
             self.file_table.setItem(row, 1, QTableWidgetItem(current_name))
         self.current_index = 0
         self.processing_enabled = True
+        self.refresh_file_table_states()
         log_info(
             f"Starting generation for {len(self.pdf_files)} files using backend {self.get_ai_backend()}"
         )
@@ -2370,6 +2400,7 @@ class RenamerGUI(QMainWindow):
             worker.requestInterruption()
         self.set_status("Stopped • results kept")
         self.append_status_message("[STOP] Halted new OCR/AI tasks; existing results preserved")
+        self.refresh_file_table_states()
         self.stop_processing_ui("Stopped")
 
     def stop_and_reprocess(self):
@@ -2397,6 +2428,7 @@ class RenamerGUI(QMainWindow):
         self.stop_event.clear()
         self.current_index = 0
         self.processing_enabled = False
+        self.refresh_file_table_states()
         if self.pdf_files:
             self.file_table.selectRow(0)
         self.stop_processing_ui("Reset")
@@ -2590,6 +2622,7 @@ class RenamerGUI(QMainWindow):
     def handle_worker_finished(self, index: int, result: dict):
         self.active_workers.pop(index, None)
         self.file_results[index] = result
+        self.update_file_table_row_state(index)
         self.apply_cached_result(index, result)
         self.update_processing_progress()
         if not self.stop_event.is_set() and self.processing_enabled:
@@ -2605,6 +2638,7 @@ class RenamerGUI(QMainWindow):
     def handle_worker_failed(self, index: int, error: Exception):
         self.active_workers.pop(index, None)
         self.failed_indices.add(index)
+        self.update_file_table_row_state(index)
         log_exception(error)
         log_info(f"Worker {index} failed: {error}")
         if not self.stop_event.is_set():
@@ -2620,6 +2654,40 @@ class RenamerGUI(QMainWindow):
         if not self.active_workers:
             final_status = "Stopped" if self.stop_event.is_set() else "Idle"
             self.stop_processing_ui(final_status)
+
+    def update_file_table_row_state(self, index: int):
+        if not hasattr(self, "file_table"):
+            return
+        if index < 0 or index >= self.file_table.rowCount():
+            return
+
+        source_item = self.file_table.item(index, 0)
+        proposed_item = self.file_table.item(index, 1)
+        if source_item is None or proposed_item is None:
+            return
+
+        is_active = index in self.active_workers
+        active_marker = "⏳ "
+        source_text = source_item.text()
+        if is_active:
+            if not source_text.startswith(active_marker):
+                source_item.setText(f"{active_marker}{source_text}")
+        elif source_text.startswith(active_marker):
+            source_item.setText(source_text[len(active_marker):])
+
+        for item in (source_item, proposed_item):
+            if is_active:
+                item.setData(Qt.ItemDataRole.BackgroundRole, QColor("#234B3B"))
+                item.setData(Qt.ItemDataRole.ForegroundRole, QColor("#D9FFEE"))
+            else:
+                item.setData(Qt.ItemDataRole.BackgroundRole, None)
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
+
+    def refresh_file_table_states(self):
+        if not hasattr(self, "file_table"):
+            return
+        for row in range(self.file_table.rowCount()):
+            self.update_file_table_row_state(row)
 
     def on_row_selected(self, row: int, _col: int):
         self.current_index = row
@@ -2721,6 +2789,7 @@ class RenamerGUI(QMainWindow):
             self.update_ocr_preview(self.ocr_text)
 
         self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
+        self.update_file_table_row_state(index)
         self.update_preview()
 
     def update_filename_for_current_row(self):
@@ -2732,6 +2801,7 @@ class RenamerGUI(QMainWindow):
         current_text = normalize_target_filename(self.filename_edit.text())
         self.filename_edit.setText(current_text)
         self.file_table.setItem(self.current_index, 1, QTableWidgetItem(current_text))
+        self.update_file_table_row_state(self.current_index)
 
         if self.current_index in self.file_results:
             self.file_results[self.current_index]["filename"] = current_text
@@ -2758,6 +2828,7 @@ class RenamerGUI(QMainWindow):
         worker.finished.connect(self.handle_worker_finished)
         worker.failed.connect(self.handle_worker_failed)
         self.active_workers[index] = worker
+        self.update_file_table_row_state(index)
         self.set_status(
             f"Running OCR ({options.ocr_pages} page(s) @ {options.ocr_dpi} DPI) for file {index + 1}…"
         )
@@ -2800,16 +2871,6 @@ if __name__ == "__main__":
     app.setApplicationName("Renamer")
     app.setApplicationDisplayName("Renamer")
     app.setStyleSheet(load_stylesheet())
-    retro_palette = app.palette()
-    retro_palette.setColor(QPalette.ColorRole.Window, QColor("#000000"))
-    retro_palette.setColor(QPalette.ColorRole.Base, QColor("#000000"))
-    retro_palette.setColor(QPalette.ColorRole.Text, QColor("#00FF66"))
-    retro_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#00FF66"))
-    retro_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#00AA44"))
-    retro_palette.setColor(QPalette.ColorRole.Highlight, QColor("#00FF66"))
-    retro_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
-    app.setPalette(retro_palette)
-
     icon_path = os.path.join(BASE_DIR, "assets", "logo.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
@@ -2821,6 +2882,3 @@ if __name__ == "__main__":
 
     sys.exit(app.exec())
 
-
-if __name__ == "__main__":
-    main()
