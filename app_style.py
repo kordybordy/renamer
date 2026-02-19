@@ -44,10 +44,8 @@ def load_stylesheet() -> str:
         try:
             with open(style_path, "r", encoding="utf-8") as f:
                 stylesheet = f.read()
-            if filename == "modern.qss":
-                tokens = _load_theme_tokens("modern")
-                return _compile_stylesheet(stylesheet, tokens)
-            return stylesheet
+            tokens = _load_theme_tokens("modern")
+            return _compile_stylesheet(stylesheet, tokens)
         except Exception as e:
             log_exception(e)
     return GLOBAL_STYLESHEET
