@@ -55,6 +55,14 @@ SUPPORTED_LANGUAGES = {
 }
 
 
+def pick_asset(*names: str) -> str:
+    for name in names:
+        candidate = os.path.join(BASE_DIR, "assets", name)
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
 def log_filesystem_action(operation: str, source: str, destination: str, status: str) -> None:
     log_info(
         f"[FS] {operation} | status={status} | source={os.path.abspath(source)} | destination={os.path.abspath(destination)}"
@@ -128,17 +136,19 @@ class RenamerGUI(QMainWindow):
         brand_layout = QVBoxLayout()
         brand_layout.setContentsMargins(8, 8, 8, 8)
         brand_layout.setSpacing(8)
-        logo_path = None
-        for candidate in ("logo-256.png", "logo-square.png", "logo_256x256.png"):
-            candidate_path = os.path.join(BASE_DIR, "assets", candidate)
-            if os.path.exists(candidate_path):
-                logo_path = candidate_path
-                break
+        logo_path = pick_asset(
+            "logo_large_256px.png",
+            "logo_large_512px.png",
+            "logo_large_1024px.png",
+            "logo_48x48.png",
+            "logo_32x32.png",
+            "logo_256x256.png",
+        )
         pixmap = QPixmap(logo_path) if logo_path else QPixmap()
         if not pixmap.isNull():
             self.logo_label = QLabel()
             self.logo_label.setPixmap(
-                pixmap.scaled(QSize(56, 56), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                pixmap.scaled(QSize(180, 64), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             )
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             brand_layout.addWidget(self.logo_label)
