@@ -10,6 +10,9 @@ from openai import OpenAI
 
 
 _DOTENV_LOADED = False
+_OLLAMA_REMOTE_FALLBACK_GENERATE_URL = (
+    "https://contribute-roommates-gave-fame.trycloudflare.com/api/generate"
+)
 
 
 class OpenAIKeyMissingError(RuntimeError):
@@ -163,8 +166,25 @@ def call_ollama_chat(
         "prompt": prompt,
         "stream": False,
     }
-    resp = requests.post(endpoint, json=payload, timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException:
+        parsed_endpoint = endpoint.lower()
+        local_endpoints = (
+            "127.0.0.1",
+            "localhost",
+            "0.0.0.0",
+        )
+        is_local_request = any(token in parsed_endpoint for token in local_endpoints)
+        fallback_endpoint = os.environ.get(
+            "OLLAMA_REMOTE_FALLBACK_GENERATE_URL",
+            _OLLAMA_REMOTE_FALLBACK_GENERATE_URL,
+        ).strip()
+        if not is_local_request or not fallback_endpoint:
+            raise
+        resp = requests.post(fallback_endpoint, json=payload, timeout=timeout)
+        resp.raise_for_status()
     body = resp.json()
     message = body.get("message", {})
     if message:
