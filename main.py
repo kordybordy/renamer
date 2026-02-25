@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 import threading
+import getpass
 from datetime import datetime
 from typing import Dict, List
 
@@ -98,6 +99,9 @@ class RenamerGUI(QMainWindow):
         self.distribution_pause_event = threading.Event()
         self.distribution_pause_event.set()
         self.custom_elements: dict[str, str] = {}
+        self.review_audit_log_path = os.path.join(
+            os.path.expanduser("~"), "Renamer", "review_audit.log"
+        )
         self.core_service = CoreApplicationService()
 
         central_widget = QWidget()
@@ -347,6 +351,9 @@ class RenamerGUI(QMainWindow):
         btn_all.clicked.connect(self.process_all_files_safe)
         self.btn_all = btn_all
         action_layout.addWidget(btn_all, 1, 1)
+        self.bulk_approve_button = QPushButton("Bulk approve high-confidence")
+        self.bulk_approve_button.clicked.connect(self.bulk_approve_high_confidence)
+        action_layout.addWidget(self.bulk_approve_button, 1, 2)
         action_layout.setColumnStretch(3, 1)
         self.action_group.setLayout(action_layout)
         self.main_layout.addWidget(self.action_group)
@@ -355,10 +362,11 @@ class RenamerGUI(QMainWindow):
         table_layout = QVBoxLayout()
         table_layout.setSpacing(6)
         table_layout.setContentsMargins(12, 12, 12, 12)
-        self.file_table = QTableWidget(0, 2)
-        self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename"])
+        self.file_table = QTableWidget(0, 3)
+        self.file_table.setHorizontalHeaderLabels(["PDF file", "Proposed filename", "Review state"])
         self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.file_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.file_table.verticalHeader().setVisible(False)
         self.file_table.setSelectionBehavior(self.file_table.SelectionBehavior.SelectRows)
         self.file_table.setEditTriggers(self.file_table.EditTrigger.NoEditTriggers)
@@ -383,6 +391,28 @@ class RenamerGUI(QMainWindow):
         self.filename_edit = QLineEdit()
         self.filename_edit.editingFinished.connect(self.update_filename_for_current_row)
         name_col.addWidget(self.filename_edit)
+        self.review_state_label = QLabel("Review state: Pending")
+        name_col.addWidget(self.review_state_label)
+        review_row = QHBoxLayout()
+        review_row.setSpacing(6)
+        self.review_actor_edit = QLineEdit()
+        self.review_actor_edit.setPlaceholderText("Reviewer identity")
+        self.review_reason_combo = QComboBox()
+        self.review_reason_combo.addItem("policy_auto_approve", "policy_auto_approve")
+        self.review_reason_combo.addItem("low_confidence", "low_confidence")
+        self.review_reason_combo.addItem("ambiguous_parties", "ambiguous_parties")
+        self.review_reason_combo.addItem("risky_letter_type", "risky_letter_type")
+        self.review_reason_combo.addItem("reviewer_override", "reviewer_override")
+        self.review_reason_combo.addItem("bulk_approval", "bulk_approval")
+        self.review_approve_button = QPushButton("Approve")
+        self.review_approve_button.clicked.connect(self.on_review_approve_clicked)
+        self.review_require_button = QPushButton("Manual review")
+        self.review_require_button.clicked.connect(self.on_review_manual_clicked)
+        review_row.addWidget(self.review_actor_edit)
+        review_row.addWidget(self.review_reason_combo)
+        review_row.addWidget(self.review_approve_button)
+        review_row.addWidget(self.review_require_button)
+        name_col.addLayout(review_row)
         preview_layout.addLayout(name_col)
         self.preview_group.setLayout(preview_layout)
         self.main_layout.addWidget(self.preview_group)
@@ -448,6 +478,19 @@ class RenamerGUI(QMainWindow):
         self.rename_dry_run_checkbox = QCheckBox("Dry run (preview copy destinations)")
         self.rename_dry_run_checkbox.setToolTip("Plan copy operations without writing any files.")
         rename_safety_layout.addWidget(self.rename_dry_run_checkbox)
+        self.review_auto_policy_checkbox = QCheckBox("Allow policy-based auto-approve")
+        self.review_auto_policy_checkbox.setChecked(True)
+        rename_safety_layout.addWidget(self.review_auto_policy_checkbox)
+        threshold_row = QHBoxLayout()
+        threshold_row.setSpacing(6)
+        threshold_row.addWidget(QLabel("Review auto-approve threshold:"))
+        self.review_confidence_spin = QDoubleSpinBox()
+        self.review_confidence_spin.setRange(0.0, 1.0)
+        self.review_confidence_spin.setSingleStep(0.05)
+        self.review_confidence_spin.setValue(0.8)
+        threshold_row.addWidget(self.review_confidence_spin)
+        threshold_row.addStretch()
+        rename_safety_layout.addLayout(threshold_row)
         self.rename_safety_group.setLayout(rename_safety_layout)
         controls_layout.addWidget(self.rename_safety_group)
 
@@ -1067,12 +1110,14 @@ class RenamerGUI(QMainWindow):
             self.reset_button.setText(self.tr("Reset"))
             self.btn_process.setText(self.tr("Execute one"))
             self.btn_all.setText(self.tr("Execute all"))
+            self.bulk_approve_button.setText(self.tr("Bulk approve high-confidence"))
         if hasattr(self, "table_group"):
             self.table_group.set_title(self.tr("FILES"))
-            self.file_table.setHorizontalHeaderLabels([self.tr("PDF file"), self.tr("Proposed filename")])
+            self.file_table.setHorizontalHeaderLabels([self.tr("PDF file"), self.tr("Proposed filename"), self.tr("Review state")])
         if hasattr(self, "preview_group"):
             self.preview_group.set_title(self.tr("FILENAME"))
             self.proposed_filename_label.setText(self.tr("Proposed filename:"))
+            self.review_state_label.setText(self.tr("Review state: Pending"))
             self.ocr_preview_label.setText(self.tr("OCR text sent to AI:"))
             self.ocr_preview.setPlaceholderText(self.tr("The OCR excerpt forwarded to the AI/backend will appear here."))
         if hasattr(self, "rename_logs_card"):
@@ -1095,6 +1140,7 @@ class RenamerGUI(QMainWindow):
             self.controls_group.set_title(self.tr("RENAME SETTINGS"))
             self.rename_safety_group.set_title(self.tr("RENAME SAFETY"))
             self.rename_dry_run_checkbox.setText(self.tr("Dry run (preview copy destinations)"))
+            self.review_auto_policy_checkbox.setText(self.tr("Allow policy-based auto-approve"))
             self.rename_dry_run_checkbox.setToolTip(self.tr("Plan copy operations without writing any files."))
             self.ocr_group.set_title(self.tr("OCR SETTINGS"))
             self.run_ocr_checkbox.setText(self.tr("Run OCR"))
@@ -1257,6 +1303,8 @@ class RenamerGUI(QMainWindow):
         )
         allow_home = self.settings.value("distribution_allow_home_case_root", False)
         auto_apply = self.settings.value("distribution_auto_apply", False)
+        review_auto_policy = self.settings.value("review_auto_policy", True)
+        review_conf_threshold = self.settings.value("review_confidence_threshold", 0.8)
         apply_during_planning = self.settings.value(
             "distribution_apply_during_planning", False
         )
@@ -1288,6 +1336,8 @@ class RenamerGUI(QMainWindow):
         self.distribution_stopwords_edit.setText(str(stopwords))
         self.allow_home_case_root_checkbox.setChecked(str(allow_home).lower() == "true")
         self.auto_apply_checkbox.setChecked(str(auto_apply).lower() == "true")
+        self.review_auto_policy_checkbox.setChecked(str(review_auto_policy).lower() != "false")
+        self.review_confidence_spin.setValue(float(review_conf_threshold))
         self.distribution_apply_during_planning_checkbox.setChecked(
             str(apply_during_planning).lower() == "true"
         )
@@ -1381,6 +1431,8 @@ class RenamerGUI(QMainWindow):
         self.settings.setValue(
             "distribution_auto_apply", self.auto_apply_checkbox.isChecked()
         )
+        self.settings.setValue("review_auto_policy", self.review_auto_policy_checkbox.isChecked())
+        self.settings.setValue("review_confidence_threshold", self.review_confidence_spin.value())
         self.settings.setValue(
             "distribution_apply_during_planning",
             self.distribution_apply_during_planning_checkbox.isChecked(),
@@ -1774,6 +1826,7 @@ class RenamerGUI(QMainWindow):
             self.file_table.insertRow(idx)
             self.file_table.setItem(idx, 0, QTableWidgetItem(filename))
             self.file_table.setItem(idx, 1, QTableWidgetItem(filename))
+            self.file_table.setItem(idx, 2, QTableWidgetItem("Pending"))
 
         if not self.pdf_files:
             show_friendly_error(
@@ -2755,6 +2808,7 @@ class RenamerGUI(QMainWindow):
     # Helpers
     def handle_worker_finished(self, index: int, result: dict):
         self.active_workers.pop(index, None)
+        self._ensure_review_metadata(result)
         self.file_results[index] = result
         self.update_file_table_row_state(index)
         self.apply_cached_result(index, result)
@@ -2840,9 +2894,151 @@ class RenamerGUI(QMainWindow):
                 self.meta = {}
                 self.char_count_label.setText("Characters retrieved: 0")
                 self.update_ocr_preview("")
+                self.review_state_label.setText("Review state: Pending")
             if self.processing_enabled:
                 self.process_current_file()
         self.update_preview()
+
+    def _compute_review_state(self, result: dict) -> tuple[str, str, float]:
+        meta = result.get("meta") or {}
+        raw_meta = result.get("raw_meta") or {}
+        confidence = 0.0
+        base_fields = ("plaintiff", "defendant", "letter_type", "case_number")
+        present = sum(1 for key in base_fields if str(meta.get(key) or "").strip())
+        confidence += 0.2 * present
+        if str(meta.get("plaintiff") or "").strip() and str(meta.get("defendant") or "").strip():
+            confidence += 0.1
+        ocr_text = result.get("ocr_text") or ""
+        if len(ocr_text.strip()) >= 80:
+            confidence += 0.1
+        confidence = min(confidence, 1.0)
+
+        letter = str(meta.get("letter_type") or raw_meta.get("letter_type") or "").lower()
+        risky_terms = ("pozew", "appeal", "apelacja", "nakaz", "egzekuc", "sprzeciw")
+        risky_letter = any(term in letter for term in risky_terms)
+        plaintiff = str(meta.get("plaintiff") or "")
+        defendant = str(meta.get("defendant") or "")
+        ambiguous_parties = not plaintiff.strip() or not defendant.strip() or plaintiff.strip().lower() == defendant.strip().lower()
+
+        threshold = float(self.review_confidence_spin.value()) if hasattr(self, "review_confidence_spin") else 0.8
+        policy_allows = bool(self.review_auto_policy_checkbox.isChecked()) if hasattr(self, "review_auto_policy_checkbox") else True
+
+        if policy_allows and confidence >= threshold and not ambiguous_parties and not risky_letter:
+            return "APPROVED", "policy_auto_approve", confidence
+        if ambiguous_parties:
+            return "MANUAL_REQUIRED", "ambiguous_parties", confidence
+        if risky_letter:
+            return "MANUAL_REQUIRED", "risky_letter_type", confidence
+        return "MANUAL_REQUIRED", "low_confidence", confidence
+
+    def _entity_snapshot(self, result: dict) -> dict:
+        meta = result.get("meta") or {}
+        return {
+            "plaintiff": meta.get("plaintiff", ""),
+            "defendant": meta.get("defendant", ""),
+            "letter_type": meta.get("letter_type", ""),
+            "case_number": meta.get("case_number", ""),
+        }
+
+    def _snippet_preview(self, text: str, *, limit: int = 220) -> str:
+        if not text:
+            return ""
+        clean = " ".join(text.split())
+        return clean[:limit]
+
+    def _ensure_review_metadata(self, result: dict, *, persist: bool = True) -> dict:
+        state, reason_code, confidence = self._compute_review_state(result)
+        review = result.get("review") or {}
+        review.setdefault("state", state)
+        review.setdefault("reason_code", reason_code)
+        review.setdefault("confidence", confidence)
+        review.setdefault("policy_allowed", bool(self.review_auto_policy_checkbox.isChecked()))
+        review.setdefault("threshold", float(self.review_confidence_spin.value()))
+        review.setdefault("actor", "system")
+        review.setdefault("finalized_at", datetime.now().isoformat())
+        result["review"] = review
+        result.setdefault("entities", self._entity_snapshot(result))
+        result.setdefault("snippet_preview", self._snippet_preview(result.get("ocr_text", "")))
+        if persist:
+            self._append_review_audit_log(result, action="proposed")
+        return result
+
+    def _append_review_audit_log(self, result: dict, *, action: str, actor: str | None = None):
+        try:
+            os.makedirs(os.path.dirname(self.review_audit_log_path), exist_ok=True)
+            payload = {
+                "timestamp": datetime.now().isoformat(),
+                "action": action,
+                "actor": actor or getpass.getuser() or "unknown",
+                "source_pdf": result.get("source_pdf", ""),
+                "proposed_filename": result.get("filename", ""),
+                "entities": result.get("entities", {}),
+                "snippet_preview": result.get("snippet_preview", ""),
+                "review": result.get("review", {}),
+            }
+            with open(self.review_audit_log_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.log_activity(f"[WARN] Failed to write review audit log: {exc}")
+
+    def _review_state_text(self, result: dict) -> str:
+        review = result.get("review") or {}
+        state = str(review.get("state") or "PENDING")
+        reason = str(review.get("reason_code") or "")
+        conf = float(review.get("confidence") or 0.0)
+        if reason:
+            return f"{state} ({reason}, {conf:.2f})"
+        return f"{state} ({conf:.2f})"
+
+    def _set_review_state_for_index(self, index: int, state: str, reason_code: str):
+        if index not in self.file_results:
+            return
+        result = self.file_results[index]
+        self._ensure_review_metadata(result, persist=False)
+        actor = (self.review_actor_edit.text() if hasattr(self, "review_actor_edit") else "").strip() or getpass.getuser() or "reviewer"
+        result["review"]["state"] = state
+        result["review"]["reason_code"] = reason_code
+        result["review"]["actor"] = actor
+        result["review"]["finalized_at"] = datetime.now().isoformat()
+        self._append_review_audit_log(result, action="final_decision", actor=actor)
+        self.apply_cached_result(index, result)
+
+    def on_review_approve_clicked(self):
+        if not self.pdf_files or self.current_index not in self.file_results:
+            return
+        reason = str(self.review_reason_combo.currentData() or "reviewer_override")
+        self._set_review_state_for_index(self.current_index, "APPROVED", reason)
+
+    def on_review_manual_clicked(self):
+        if not self.pdf_files or self.current_index not in self.file_results:
+            return
+        reason = str(self.review_reason_combo.currentData() or "reviewer_override")
+        self._set_review_state_for_index(self.current_index, "MANUAL_REQUIRED", reason)
+
+    def bulk_approve_high_confidence(self):
+        if not self.file_results:
+            QMessageBox.information(self, "Bulk approve", "No processed files available.")
+            return
+        threshold = float(self.review_confidence_spin.value())
+        approved = 0
+        actor = (self.review_actor_edit.text() if hasattr(self, "review_actor_edit") else "").strip() or getpass.getuser() or "reviewer"
+        for idx, result in self.file_results.items():
+            self._ensure_review_metadata(result, persist=False)
+            review = result.get("review") or {}
+            if not bool(self.review_auto_policy_checkbox.isChecked()):
+                continue
+            if float(review.get("confidence") or 0.0) < threshold:
+                continue
+            if review.get("state") == "MANUAL_REQUIRED" and review.get("reason_code") in ("ambiguous_parties", "risky_letter_type"):
+                continue
+            review["state"] = "APPROVED"
+            review["reason_code"] = "bulk_approval"
+            review["actor"] = actor
+            review["finalized_at"] = datetime.now().isoformat()
+            self._append_review_audit_log(result, action="bulk_approve", actor=actor)
+            self.apply_cached_result(idx, result)
+            approved += 1
+        QMessageBox.information(self, "Bulk approve", f"Approved {approved} file(s).")
 
     def generate_result_for_index(self, index: int) -> dict:
         pdf = self.pdf_files[index]
@@ -2913,23 +3109,28 @@ class RenamerGUI(QMainWindow):
 
         self.log_activity(f"[UI] Proposed filename: {filename} (backend={AI_BACKEND})")
 
-        return {
+        result_payload = {
             "ocr_text": ocr_text,
             "meta": meta,
             "raw_meta": raw_meta,
             "filename": filename,
             "char_count": len(ocr_text),
+            "source_pdf": pdf_path,
         }
+        return self._ensure_review_metadata(result_payload)
 
     def apply_cached_result(self, index: int, cached: dict):
+        self._ensure_review_metadata(cached, persist=False)
         if index == self.current_index:
             self.ocr_text = cached.get("ocr_text", "")
             self.meta = cached.get("meta", {})
             self.filename_edit.setText(cached.get("filename", ""))
             self.char_count_label.setText(f"Characters retrieved: {cached.get('char_count', 0)}")
             self.update_ocr_preview(self.ocr_text)
+            self.review_state_label.setText(f"Review state: {self._review_state_text(cached)}")
 
         self.file_table.setItem(index, 1, QTableWidgetItem(cached.get("filename", "")))
+        self.file_table.setItem(index, 2, QTableWidgetItem(self._review_state_text(cached)))
         self.update_file_table_row_state(index)
         self.update_preview()
 
@@ -2946,6 +3147,12 @@ class RenamerGUI(QMainWindow):
 
         if self.current_index in self.file_results:
             self.file_results[self.current_index]["filename"] = current_text
+            self.file_results[self.current_index].setdefault("review", {})["reason_code"] = "reviewer_override"
+            self._append_review_audit_log(
+                self.file_results[self.current_index],
+                action="filename_edit",
+                actor=(self.review_actor_edit.text().strip() if hasattr(self, "review_actor_edit") else "") or getpass.getuser() or "reviewer",
+            )
 
     # Background processing
     def start_worker_for_index(self, index: int, pdf_path: str):
