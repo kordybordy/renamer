@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 from typing import Callable
 from urllib.parse import urljoin
 
 import requests
 from openai import OpenAI
+
+try:
+    from websocket import WebSocketConnectionClosedException, create_connection
+except Exception:  # pragma: no cover - optional dependency for websocket acceleration
+    WebSocketConnectionClosedException = RuntimeError
+    create_connection = None
 
 
 _DOTENV_LOADED = False
@@ -17,6 +25,151 @@ _OLLAMA_REMOTE_FALLBACK_GENERATE_URL = (
 
 class OpenAIKeyMissingError(RuntimeError):
     pass
+
+
+class _OpenAIResponsesWebSocketSession:
+    """Thread-safe helper for persistent Responses API websocket calls."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.socket = None
+        self.lock = threading.Lock()
+        self.previous_response_id: str | None = None
+
+    def _connect(self):
+        if create_connection is None:
+            raise RuntimeError("websocket-client is not installed")
+        if self.socket is not None:
+            return
+        self.socket = create_connection(
+            "wss://api.openai.com/v1/responses",
+            header=[f"Authorization: Bearer {self.api_key}"],
+            timeout=120,
+        )
+
+    def close(self):
+        if self.socket is None:
+            return
+        try:
+            self.socket.close()
+        except Exception:
+            pass
+        self.socket = None
+        self.previous_response_id = None
+
+    @staticmethod
+    def _extract_response_text(response: dict) -> str:
+        output = response.get("output", []) if isinstance(response, dict) else []
+        chunks: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "message":
+                continue
+            for part in item.get("content", []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text":
+                    text = part.get("text", "")
+                    if text:
+                        chunks.append(text)
+        return "".join(chunks).strip()
+
+    def _receive_response(self) -> tuple[str, str | None]:
+        assert self.socket is not None
+        output_chunks: list[str] = []
+        while True:
+            raw_message = self.socket.recv()
+            if not raw_message:
+                continue
+            event = json.loads(raw_message)
+            event_type = event.get("type")
+            if event_type == "response.output_text.delta":
+                delta = event.get("delta", "")
+                if delta:
+                    output_chunks.append(delta)
+                continue
+            if event_type == "response.completed":
+                response = event.get("response", {})
+                response_id = response.get("id") if isinstance(response, dict) else None
+                text = "".join(output_chunks).strip()
+                if not text:
+                    text = self._extract_response_text(response)
+                return text, response_id
+            if event_type == "error":
+                error = event.get("error", {}) if isinstance(event, dict) else {}
+                message = (
+                    error.get("message")
+                    or event.get("message")
+                    or "Unknown websocket responses API error"
+                )
+                code = error.get("code") if isinstance(error, dict) else None
+                raise RuntimeError(f"{code or 'responses_error'}: {message}")
+
+    def create_response(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        temperature: float | None,
+    ) -> str:
+        payload: dict = {
+            "type": "response.create",
+            "model": model,
+            "store": False,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_prompt}],
+                },
+            ],
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if self.previous_response_id:
+            payload["previous_response_id"] = self.previous_response_id
+
+        with self.lock:
+            self._connect()
+            assert self.socket is not None
+            try:
+                self.socket.send(json.dumps(payload))
+                text, response_id = self._receive_response()
+            except WebSocketConnectionClosedException:
+                self.close()
+                self._connect()
+                assert self.socket is not None
+                payload.pop("previous_response_id", None)
+                self.socket.send(json.dumps(payload))
+                text, response_id = self._receive_response()
+            except Exception as exc:
+                if "previous_response_not_found" in str(exc):
+                    self.previous_response_id = None
+                    payload.pop("previous_response_id", None)
+                    self.socket.send(json.dumps(payload))
+                    text, response_id = self._receive_response()
+                elif "websocket_connection_limit_reached" in str(exc):
+                    self.close()
+                    self._connect()
+                    payload.pop("previous_response_id", None)
+                    self.socket.send(json.dumps(payload))
+                    text, response_id = self._receive_response()
+                else:
+                    raise
+
+            self.previous_response_id = response_id
+            return text
+
+
+_OPENAI_WS_SESSION: _OpenAIResponsesWebSocketSession | None = None
+_OPENAI_WS_LOCK = threading.Lock()
 
 
 def _running_in_github_actions() -> bool:
@@ -87,6 +240,41 @@ def _call_openai(
     return resp.choices[0].message.content or ""
 
 
+def _websocket_mode_enabled() -> bool:
+    return os.environ.get("OPENAI_WEBSOCKET_MODE", "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _get_ws_session() -> _OpenAIResponsesWebSocketSession:
+    global _OPENAI_WS_SESSION
+    if _OPENAI_WS_SESSION is not None:
+        return _OPENAI_WS_SESSION
+    with _OPENAI_WS_LOCK:
+        if _OPENAI_WS_SESSION is None:
+            _OPENAI_WS_SESSION = _OpenAIResponsesWebSocketSession(_resolve_openai_key())
+    return _OPENAI_WS_SESSION
+
+
+def _call_openai_via_websocket(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    temperature: float | None,
+) -> str:
+    session = _get_ws_session()
+    return session.create_response(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=model,
+        temperature=temperature,
+    )
+
+
 def call_openai_chat(
     *,
     system_prompt: str,
@@ -98,6 +286,13 @@ def call_openai_chat(
     log_info: Callable[[str], None] | None = None,
 ) -> str:
     try:
+        if _websocket_mode_enabled() and create_connection is not None:
+            return _call_openai_via_websocket(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                temperature=temperature,
+            )
         return _call_openai(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -106,9 +301,9 @@ def call_openai_chat(
         )
     except OpenAIKeyMissingError:
         raise
-    except Exception:
+    except Exception as exc:
         if log_info:
-            log_info(f"OpenAI {model} failed; retrying with {fallback_model}")
+            log_info(f"OpenAI {model} failed; retrying with {fallback_model} ({exc})")
     return _call_openai(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
