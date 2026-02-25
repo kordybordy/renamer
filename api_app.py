@@ -177,6 +177,44 @@ class LoginResponse(BaseModel):
     session_id: str
 
 
+
+
+class OnboardingCreateRequest(BaseModel):
+    workspace_name: str = Field(min_length=1, max_length=200)
+    admin_email: EmailStr
+    sso_provider: Literal["saml", "oidc"] | None = None
+
+
+class OnboardingResponse(BaseModel):
+    tenant_id: str
+    workspace_name: str
+    onboarding: dict[str, Any]
+
+
+class OnboardingStepUpdateRequest(BaseModel):
+    done: bool
+
+
+class UsageSummaryResponse(BaseModel):
+    tenant_id: str
+    plan: str
+    usage: dict[str, float]
+    limits: dict[str, dict[str, float]]
+    notifications: list[dict[str, Any]]
+
+
+class InvoiceSummaryResponse(BaseModel):
+    tenant_id: str
+    period: str
+    currency: str
+    line_items: list[dict[str, Any]]
+    total_amount: float
+
+
+class SupportDashboardResponse(BaseModel):
+    generated_at: str
+    tenant_count: int
+    tenants: list[dict[str, Any]]
 class SsoProviderConfig(BaseModel):
     provider: Literal["saml", "oidc"]
     display_name: str
@@ -315,6 +353,56 @@ def complete_sso(provider: str, request: SsoCallbackRequest):
     access = AccessContext(tenant_id=request.tenant_id, user_id=request.user_id, role=request.role)
     session_id = _store_session(access, str(request.email))
     return LoginResponse(access_token=token, expires_in=3600, session_id=session_id)
+
+
+@app.post("/api/v1/tenants/onboarding", response_model=OnboardingResponse, tags=["tenants"])
+def create_tenant_onboarding(request: OnboardingCreateRequest):
+    tenant = service.create_tenant_onboarding(
+        workspace_name=request.workspace_name,
+        admin_email=str(request.admin_email),
+        sso_provider=request.sso_provider,
+    )
+    return OnboardingResponse(
+        tenant_id=tenant.tenant_id,
+        workspace_name=tenant.name,
+        onboarding=tenant.onboarding,
+    )
+
+
+@app.get("/api/v1/tenants/{tenant_id}/onboarding", response_model=OnboardingResponse, tags=["tenants"])
+def get_tenant_onboarding(tenant_id: str, access: AccessContext = Depends(get_access_context)):
+    service._require_tenant_scope(tenant_id, access)
+    onboarding = service.get_onboarding(tenant_id)
+    tenant = service._ensure_tenant(tenant_id)
+    return OnboardingResponse(tenant_id=tenant_id, workspace_name=tenant.name, onboarding=onboarding)
+
+
+@app.patch("/api/v1/tenants/{tenant_id}/onboarding/{step_id}", response_model=OnboardingResponse, tags=["tenants"])
+def update_tenant_onboarding_step(
+    tenant_id: str,
+    step_id: str,
+    request: OnboardingStepUpdateRequest,
+    access: AccessContext = Depends(get_access_context),
+):
+    service._require_tenant_scope(tenant_id, access)
+    onboarding = service.complete_onboarding_step(tenant_id, step_id, request.done)
+    tenant = service._ensure_tenant(tenant_id)
+    return OnboardingResponse(tenant_id=tenant_id, workspace_name=tenant.name, onboarding=onboarding)
+
+
+@app.get("/api/v1/tenants/{tenant_id}/usage", response_model=UsageSummaryResponse, tags=["billing"])
+def get_usage_summary(tenant_id: str, access: AccessContext = Depends(get_access_context)):
+    return UsageSummaryResponse(**service.get_usage_summary(access, tenant_id))
+
+
+@app.get("/api/v1/tenants/{tenant_id}/usage/invoice", response_model=InvoiceSummaryResponse, tags=["billing"])
+def get_invoice_summary(tenant_id: str, access: AccessContext = Depends(get_access_context)):
+    return InvoiceSummaryResponse(**service.get_invoice_summary(access, tenant_id))
+
+
+@app.get("/api/v1/internal/support/dashboard", response_model=SupportDashboardResponse, tags=["internal"])
+def get_support_dashboard(_: str = Header(default="", alias="X-Internal-Token")):
+    return SupportDashboardResponse(**service.get_support_dashboard())
 
 
 @app.post(
