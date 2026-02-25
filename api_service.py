@@ -95,6 +95,11 @@ class TenantRecord:
     tenant_id: str
     name: str
     created_at: str
+    plan_name: str = "growth"
+    usage: dict[str, float] = field(default_factory=dict)
+    plan_limits: dict[str, dict[str, float]] = field(default_factory=dict)
+    onboarding: dict[str, Any] = field(default_factory=dict)
+    notifications: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -177,6 +182,26 @@ class RenamerApiService:
         self._processing_jobs: dict[tuple[str, str, str], ProcessingJobRecord] = {}
         self._audit_events: dict[tuple[str, str], list[AuditEventRecord]] = {}
 
+    @staticmethod
+    def _default_plan_limits() -> dict[str, dict[str, float]]:
+        return {
+            "pages_ocrd": {"soft": 10000, "hard": 12000},
+            "documents_processed": {"soft": 5000, "hard": 6000},
+            "ai_tokens": {"soft": 5_000_000, "hard": 6_000_000},
+            "storage_bytes": {"soft": 5 * 1024**3, "hard": 6 * 1024**3},
+            "active_users": {"soft": 50, "hard": 75},
+        }
+
+    @staticmethod
+    def _default_usage() -> dict[str, float]:
+        return {
+            "pages_ocrd": 0,
+            "documents_processed": 0,
+            "ai_tokens": 0,
+            "storage_bytes": 0,
+            "active_users": 0,
+        }
+
     def _ensure_core(self):
         if self._deps is None:
             self._deps = _CoreDeps()
@@ -195,12 +220,100 @@ class RenamerApiService:
     def _ensure_tenant(self, tenant_id: str) -> TenantRecord:
         tenant = self._tenants.get(tenant_id)
         if tenant is None:
-            tenant = TenantRecord(tenant_id=tenant_id, name=tenant_id, created_at=utc_now_iso())
+            tenant = TenantRecord(
+                tenant_id=tenant_id,
+                name=tenant_id,
+                created_at=utc_now_iso(),
+                usage=self._default_usage(),
+                plan_limits=self._default_plan_limits(),
+                onboarding={
+                    "workspace_created": True,
+                    "admin_invited": False,
+                    "sso_provider": None,
+                    "sso_configured": False,
+                    "checklist": [
+                        {"id": "workspace", "label": "Create workspace", "done": True},
+                        {"id": "admin_invite", "label": "Invite first admin", "done": False},
+                        {"id": "sso", "label": "Configure SSO", "done": False},
+                        {"id": "sso_test", "label": "Validate SSO login", "done": False},
+                    ],
+                },
+            )
             self._tenants[tenant_id] = tenant
         return tenant
 
+    def _add_notification(self, tenant: TenantRecord, level: str, message: str, details: dict[str, Any]) -> None:
+        tenant.notifications.append(
+            {
+                "id": str(uuid.uuid4()),
+                "level": level,
+                "message": message,
+                "details": details,
+                "created_at": utc_now_iso(),
+            }
+        )
+
+    def _increment_usage(self, tenant: TenantRecord, metric: str, amount: float) -> None:
+        if amount <= 0:
+            return
+        current = float(tenant.usage.get(metric, 0.0))
+        limits = tenant.plan_limits.get(metric, {})
+        soft = float(limits.get("soft", float("inf")))
+        hard = float(limits.get("hard", float("inf")))
+        next_value = current + amount
+        if next_value > hard:
+            self._add_notification(
+                tenant,
+                "hard_cap",
+                f"Hard cap reached for {metric}; operation blocked.",
+                {"metric": metric, "current": current, "attempted_increment": amount, "hard": hard},
+            )
+            raise ApiServiceError(
+                code="plan_hard_cap_exceeded",
+                message=f"Plan hard cap exceeded for {metric}.",
+                status_code=402,
+                details={"metric": metric, "hard": hard, "current": current},
+            )
+        tenant.usage[metric] = next_value
+        if current < soft <= next_value:
+            self._add_notification(
+                tenant,
+                "soft_cap",
+                f"Soft cap reached for {metric}.",
+                {"metric": metric, "value": next_value, "soft": soft},
+            )
+
+    def create_tenant_onboarding(self, workspace_name: str, admin_email: str, sso_provider: str | None) -> TenantRecord:
+        tenant_id = str(uuid.uuid4())
+        tenant = self._ensure_tenant(tenant_id)
+        tenant.name = workspace_name
+        tenant.onboarding["admin_invited"] = True
+        tenant.onboarding["admin_email"] = admin_email
+        tenant.onboarding["invite_sent_at"] = utc_now_iso()
+        tenant.onboarding["sso_provider"] = sso_provider
+        for item in tenant.onboarding["checklist"]:
+            if item["id"] in {"workspace", "admin_invite"}:
+                item["done"] = True
+            if item["id"] == "sso" and sso_provider:
+                item["done"] = True
+        return tenant
+
+    def get_onboarding(self, tenant_id: str) -> dict[str, Any]:
+        tenant = self._ensure_tenant(tenant_id)
+        return tenant.onboarding
+
+    def complete_onboarding_step(self, tenant_id: str, step_id: str, done: bool) -> dict[str, Any]:
+        tenant = self._ensure_tenant(tenant_id)
+        for item in tenant.onboarding.get("checklist", []):
+            if item.get("id") == step_id:
+                item["done"] = done
+                if step_id == "sso":
+                    tenant.onboarding["sso_configured"] = done
+                return tenant.onboarding
+        raise ApiServiceError("onboarding_step_not_found", "Onboarding step was not found.", 404)
+
     def upsert_firm_user(self, tenant_id: str, user_id: str, email: str, role: UserRole) -> FirmUserRecord:
-        self._ensure_tenant(tenant_id)
+        tenant = self._ensure_tenant(tenant_id)
         user = FirmUserRecord(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -210,6 +323,8 @@ class RenamerApiService:
         )
         with self._lock:
             self._firm_users[(tenant_id, user_id)] = user
+            tenant.usage["active_users"] = len({uid for t_id, uid in self._firm_users if t_id == tenant_id})
+        self._increment_usage(tenant, "active_users", 0)
         return user
 
     def _record_audit(self, tenant_id: str, matter_id: str, actor_user_id: str, action: str, details: dict[str, Any]) -> None:
@@ -261,6 +376,7 @@ class RenamerApiService:
         self._require_tenant_scope(tenant_id, access)
         access.require_permission("upload")
         matter = self.get_matter(access, tenant_id, matter_id)
+        tenant = self._ensure_tenant(tenant_id)
         stored: list[str] = []
         for filename, content in files:
             lower_name = filename.lower()
@@ -272,6 +388,7 @@ class RenamerApiService:
                     details={"filename": filename},
                 )
             target = Path(matter.input_dir) / Path(filename).name
+            self._increment_usage(tenant, "storage_bytes", len(content))
             target.write_bytes(content)
             stored.append(target.name)
             document = DocumentRecord(
@@ -299,6 +416,8 @@ class RenamerApiService:
         self._require_tenant_scope(tenant_id, access)
         required_permission = "rename_approval" if job_type == "rename" else "review"
         access.require_permission(required_permission)
+        tenant = self._ensure_tenant(tenant_id)
+        self._increment_usage(tenant, "documents_processed", 0)
         matter = self.get_matter(access, tenant_id, matter_id)
         uploaded_pdfs = sorted(str(path) for path in Path(matter.input_dir).glob("*.pdf"))
         if not uploaded_pdfs:
@@ -453,6 +572,9 @@ class RenamerApiService:
 
         result_dir = Path(matter.input_dir).parent / "results" / job.job_id
         result_dir.mkdir(parents=True, exist_ok=True)
+        tenant = self._ensure_tenant(job.tenant_id)
+        estimated_pages = int(payload.get("estimated_pages_per_document", 3))
+        estimated_tokens = int(payload.get("ai_tokens_per_document", 1200))
 
         for pdf_path in uploaded_pdfs:
             source_name = Path(pdf_path).name
@@ -482,6 +604,10 @@ class RenamerApiService:
             target_path = result_dir / target_name
             shutil.copy2(pdf_path, target_path)
             job.result_files.append({"name": target_name, "path": str(target_path), "source": source_name})
+            self._increment_usage(tenant, "documents_processed", 1)
+            if ocr_enabled:
+                self._increment_usage(tenant, "pages_ocrd", estimated_pages)
+            self._increment_usage(tenant, "ai_tokens", estimated_tokens)
 
         job.summary = {
             "processed": len(uploaded_pdfs),
@@ -531,6 +657,10 @@ class RenamerApiService:
             "planned": len(plan_response.plan),
             "auto_candidates": sum(1 for item in plan_response.plan if item.status == "auto"),
         }
+        tenant = self._ensure_tenant(job.tenant_id)
+        self._increment_usage(tenant, "documents_processed", len(uploaded_pdfs))
+        if bool(payload.get("enable_ai_tiebreaker", False)):
+            self._increment_usage(tenant, "ai_tokens", len(uploaded_pdfs) * int(payload.get("ai_tokens_per_document", 200)))
 
         if bool(payload.get("apply", False)):
             apply_audit_path = audit_dir / f"{job.job_id}_apply.json"
@@ -581,4 +711,59 @@ class RenamerApiService:
         return {
             "status_code": response.status_code,
             "delivered_at": utc_now_iso(),
+        }
+
+    def get_usage_summary(self, access: AccessContext, tenant_id: str) -> dict[str, Any]:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("export")
+        tenant = self._ensure_tenant(tenant_id)
+        return {
+            "tenant_id": tenant_id,
+            "plan": tenant.plan_name,
+            "usage": tenant.usage,
+            "limits": tenant.plan_limits,
+            "notifications": tenant.notifications,
+        }
+
+    def get_invoice_summary(self, access: AccessContext, tenant_id: str) -> dict[str, Any]:
+        summary = self.get_usage_summary(access, tenant_id)
+        usage = summary["usage"]
+        rates = {
+            "pages_ocrd": 0.02,
+            "documents_processed": 0.05,
+            "ai_tokens": 0.000002,
+            "storage_bytes": 0.0,
+            "active_users": 12.0,
+        }
+        line_items = []
+        total = 0.0
+        for metric, value in usage.items():
+            cost = float(value) * rates.get(metric, 0.0)
+            line_items.append({"metric": metric, "quantity": value, "unit_rate": rates.get(metric, 0.0), "amount": round(cost, 2)})
+            total += cost
+        return {
+            "tenant_id": tenant_id,
+            "period": "all_time",
+            "currency": "USD",
+            "line_items": line_items,
+            "total_amount": round(total, 2),
+        }
+
+    def get_support_dashboard(self) -> dict[str, Any]:
+        tenants = []
+        for tenant in self._tenants.values():
+            tenants.append(
+                {
+                    "tenant_id": tenant.tenant_id,
+                    "name": tenant.name,
+                    "plan": tenant.plan_name,
+                    "usage": tenant.usage,
+                    "open_notifications": len(tenant.notifications),
+                    "created_at": tenant.created_at,
+                }
+            )
+        return {
+            "generated_at": utc_now_iso(),
+            "tenant_count": len(tenants),
+            "tenants": tenants,
         }
