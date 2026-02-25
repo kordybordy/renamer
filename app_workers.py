@@ -6,18 +6,17 @@ from typing import List
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from distribution.engine import DistributionConfig, DistributionEngine
+from distribution.engine import DistributionConfig
 from distribution.models import DistributionPlanItem
 
-from app_ai import extract_metadata_ai
 from app_logging import log_exception, log_info
-from app_ocr import get_ocr_text
-from app_text_utils import (
-    apply_meta_defaults,
-    apply_party_order,
-    build_filename,
-    defendant_from_filename,
-    requirements_from_template,
+from core_service import (
+    AiMetadataRequest,
+    CoreApplicationService,
+    DistributionApplyRequest,
+    DistributionPlanRequest,
+    OcrRequest,
+    RenameDocumentRequest,
 )
 
 
@@ -52,7 +51,7 @@ class FileProcessWorker(QThread):
         self.options = options
         self.stop_event = stop_event
         self.backend = backend
-        self.requirements = requirements_from_template(options.template_elements, options.custom_elements)
+        self.core_service = CoreApplicationService()
 
     def run(self):
         try:
@@ -63,33 +62,39 @@ class FileProcessWorker(QThread):
                 f"(pages={self.options.ocr_pages}, dpi={self.options.ocr_dpi}, "
                 f"char_limit={self.options.ocr_char_limit}, backend={self.backend})"
             )
-            ocr_text = get_ocr_text(
-                self.pdf_path,
-                self.options.ocr_char_limit,
-                self.options.ocr_dpi,
-                self.options.ocr_pages,
-            ) if self.options.ocr_enabled else ""
-            char_count = len(ocr_text)
+            result = self.core_service.process_document(
+                RenameDocumentRequest(
+                    pdf_path=self.pdf_path,
+                    source_name=self.pdf_path,
+                    ocr=OcrRequest(
+                        pdf_path=self.pdf_path,
+                        enabled=self.options.ocr_enabled,
+                        char_limit=self.options.ocr_char_limit,
+                        dpi=self.options.ocr_dpi,
+                        pages=self.options.ocr_pages,
+                    ),
+                    ai=AiMetadataRequest(
+                        ocr_text="",
+                        backend=self.backend,
+                        custom_elements=self.options.custom_elements,
+                        turbo_mode=self.options.turbo_mode,
+                    ),
+                    template_elements=self.options.template_elements,
+                    plaintiff_surname_first=self.options.plaintiff_surname_first,
+                    defendant_surname_first=self.options.defendant_surname_first,
+                )
+            )
+            ocr_text = result.ocr_text
+            char_count = result.char_count
             if char_count:
                 log_info(f"[Worker {self.index + 1}] OCR extracted {char_count} characters")
             else:
                 log_info(
                     f"[Worker {self.index + 1}] OCR returned no text; placeholders likely in output"
                 )
-            raw_meta = extract_metadata_ai(ocr_text, self.backend, self.options.custom_elements, self.options.turbo_mode) or {}
-            if not raw_meta.get("defendant"):
-                fallback_defendant = defendant_from_filename(self.pdf_path)
-                if fallback_defendant:
-                    raw_meta["defendant"] = fallback_defendant
-            defaults_applied = [
-                key for key in self.requirements if key not in raw_meta or not raw_meta.get(key)
-            ]
-            meta = apply_meta_defaults(raw_meta, self.requirements)
-            meta = apply_party_order(
-                meta,
-                plaintiff_surname_first=self.options.plaintiff_surname_first,
-                defendant_surname_first=self.options.defendant_surname_first,
-            )
+            raw_meta = result.raw_meta
+            defaults_applied = result.defaults_applied
+            meta = result.meta
 
             if defaults_applied:
                 log_info(
@@ -99,7 +104,7 @@ class FileProcessWorker(QThread):
                 f"[Worker {self.index + 1}] Extracted meta: {json.dumps(meta, ensure_ascii=False)}"
             )
 
-            filename = build_filename(meta, self.options.template_elements)
+            filename = result.filename
 
             log_info(
                 f"[Worker {self.index + 1}] Proposed filename: {filename} (backend={self.backend})"
@@ -145,25 +150,26 @@ class DistributionPlanWorker(QThread):
         self.ai_provider = ai_provider
         self.audit_log_path = audit_log_path
         self.pause_event = pause_event
+        self.core_service = CoreApplicationService()
 
     def run(self):
         try:
-            engine = DistributionEngine(
-                input_folder=self.input_dir,
-                case_root=self.case_root,
-                config=self.config,
-                ai_provider=self.ai_provider,
-                logger=self.log_ready.emit,
+            response = self.core_service.plan_distribution(
+                DistributionPlanRequest(
+                    input_dir=self.input_dir,
+                    pdf_files=self.pdf_files,
+                    case_root=self.case_root,
+                    config=self.config,
+                    ai_provider=self.ai_provider,
+                    audit_log_path=self.audit_log_path,
+                    pause_event=self.pause_event,
+                    progress_cb=lambda processed, total, status: self.progress.emit(
+                        processed, total, status
+                    ),
+                    log_cb=self.log_ready.emit,
+                )
             )
-            plan = engine.plan_distribution(
-                self.pdf_files,
-                progress_cb=lambda processed, total, status: self.progress.emit(
-                    processed, total, status
-                ),
-                pause_event=self.pause_event,
-                audit_log_path=self.audit_log_path,
-            )
-            self.plan_ready.emit(plan)
+            self.plan_ready.emit(response.plan)
         except Exception as e:
             log_exception(e)
             self.log_ready.emit(f"Unexpected error during planning: {e}")
@@ -197,24 +203,25 @@ class DistributionApplyWorker(QThread):
         self.auto_only = auto_only
         self.audit_log_path = audit_log_path
         self.pause_event = pause_event
+        self.core_service = CoreApplicationService()
 
     def run(self):
         try:
-            engine = DistributionEngine(
-                input_folder=self.input_dir,
-                case_root=self.case_root,
-                config=self.config,
-                ai_provider=self.ai_provider,
-                logger=self.log_ready.emit,
-            )
-            engine.apply_plan(
-                self.plan,
-                auto_only=self.auto_only,
-                audit_log_path=self.audit_log_path,
-                progress_cb=lambda processed, total, status: self.progress.emit(
-                    processed, total, status
-                ),
-                pause_event=self.pause_event,
+            self.core_service.apply_distribution_plan(
+                DistributionApplyRequest(
+                    input_dir=self.input_dir,
+                    case_root=self.case_root,
+                    config=self.config,
+                    ai_provider=self.ai_provider,
+                    plan=self.plan,
+                    auto_only=self.auto_only,
+                    audit_log_path=self.audit_log_path,
+                    pause_event=self.pause_event,
+                    progress_cb=lambda processed, total, status: self.progress.emit(
+                        processed, total, status
+                    ),
+                    log_cb=self.log_ready.emit,
+                )
             )
         except Exception as e:
             log_exception(e)

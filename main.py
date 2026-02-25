@@ -24,22 +24,20 @@ from distribution.scorer import DEFAULT_STOPWORDS
 from distribution.safety import resolve_destination_path, validate_distribution_paths
 
 from ai_service import check_ollama_health, get_ollama_base_url
-from app_ai import extract_metadata_ai
 from app_constants import AI_BACKEND, DEFAULT_TEMPLATE_ELEMENTS, FILENAME_RULES
 from app_logging import append_distribution_log, log_exception, log_info
-from app_ocr import get_ocr_text
 from app_path_utils import validate_path_set
 from app_runtime import BASE_DIR
 from app_style import load_stylesheet
-from app_text_utils import (
-    apply_meta_defaults,
-    apply_party_order,
-    build_filename,
-    defendant_from_filename,
-    normalize_target_filename,
-    requirements_from_template,
-)
+from app_text_utils import normalize_target_filename
 from app_ui import show_friendly_error
+from core_service import (
+    AiMetadataRequest,
+    CoreApplicationService,
+    FilenameBuildRequest,
+    OcrRequest,
+    RenameDocumentRequest,
+)
 from app_workers import (
     DistributionApplyWorker,
     DistributionPlanWorker,
@@ -100,6 +98,7 @@ class RenamerGUI(QMainWindow):
         self.distribution_pause_event = threading.Event()
         self.distribution_pause_event.set()
         self.custom_elements: dict[str, str] = {}
+        self.core_service = CoreApplicationService()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -2454,14 +2453,16 @@ class RenamerGUI(QMainWindow):
         meta = self.meta or {}
         if self.current_index in self.file_results:
             meta = self.file_results[self.current_index].get("meta", meta)
-        requirements = requirements_from_template(options.template_elements, options.custom_elements)
-        meta = apply_meta_defaults(meta, requirements)
-        meta = apply_party_order(
-            meta,
-            plaintiff_surname_first=options.plaintiff_surname_first,
-            defendant_surname_first=options.defendant_surname_first,
+        filename_result = self.core_service.generate_filename(
+            FilenameBuildRequest(
+                meta=meta,
+                template_elements=options.template_elements,
+                custom_elements=options.custom_elements,
+                plaintiff_surname_first=options.plaintiff_surname_first,
+                defendant_surname_first=options.defendant_surname_first,
+            )
         )
-        filename = build_filename(meta, options.template_elements)
+        filename = filename_result.filename
         if filename:
             self.filename_edit.blockSignals(True)
             self.filename_edit.setText(filename)
@@ -2849,43 +2850,50 @@ class RenamerGUI(QMainWindow):
         global AI_BACKEND
         AI_BACKEND = self.get_ai_backend()
         options = self.build_options()
-        requirements = requirements_from_template(options.template_elements, options.custom_elements)
         self.log_activity(
             f"[UI] Starting OCR for '{pdf}' (pages={options.ocr_pages}, dpi={options.ocr_dpi}, "
             f"char_limit={options.ocr_char_limit}, backend={AI_BACKEND})"
         )
-        ocr_text = get_ocr_text(
-            pdf_path,
-            options.ocr_char_limit,
-            options.ocr_dpi,
-            options.ocr_pages,
-        ) if options.ocr_enabled else ""
+        result = self.core_service.process_document(
+            RenameDocumentRequest(
+                pdf_path=pdf_path,
+                source_name=pdf,
+                ocr=OcrRequest(
+                    pdf_path=pdf_path,
+                    enabled=options.ocr_enabled,
+                    char_limit=options.ocr_char_limit,
+                    dpi=options.ocr_dpi,
+                    pages=options.ocr_pages,
+                ),
+                ai=AiMetadataRequest(
+                    ocr_text="",
+                    backend=self.get_ai_backend(),
+                    custom_elements=options.custom_elements,
+                    turbo_mode=options.turbo_mode,
+                ),
+                template_elements=options.template_elements,
+                plaintiff_surname_first=options.plaintiff_surname_first,
+                defendant_surname_first=options.defendant_surname_first,
+            )
+        )
 
-        char_count = len(ocr_text)
+        ocr_text = result.ocr_text
+        char_count = result.char_count
         self.log_activity(f"[UI] OCR extracted {char_count} characters for '{pdf}'")
         if char_count == 0:
             self.log_activity(
                 f"[UI] No OCR text for '{pdf}'; filenames will rely on placeholders/defaults"
             )
 
-        raw_meta = extract_metadata_ai(ocr_text, self.get_ai_backend(), options.custom_elements, options.turbo_mode) or {}
+        raw_meta = result.raw_meta
         self.log_activity(
             "[AI] JSON parsed: "
             f"defendant={raw_meta.get('defendant')}, "
             f"plaintiff={raw_meta.get('plaintiff')}, "
             f"letter_type={raw_meta.get('letter_type')}"
         )
-        if not raw_meta.get("defendant"):
-            fallback_defendant = defendant_from_filename(pdf)
-            if fallback_defendant:
-                raw_meta["defendant"] = fallback_defendant
-        defaults_applied = [key for key in requirements if key not in raw_meta or not raw_meta.get(key)]
-        meta = apply_meta_defaults(raw_meta, requirements)
-        meta = apply_party_order(
-            meta,
-            plaintiff_surname_first=options.plaintiff_surname_first,
-            defendant_surname_first=options.defendant_surname_first,
-        )
+        defaults_applied = result.defaults_applied
+        meta = result.meta
 
         if defaults_applied:
             self.log_activity(
@@ -2901,7 +2909,7 @@ class RenamerGUI(QMainWindow):
                 )
         self.log_activity(f"[UI] Extracted meta: {json.dumps(meta, ensure_ascii=False)}")
 
-        filename = build_filename(meta, options.template_elements)
+        filename = result.filename
 
         self.log_activity(f"[UI] Proposed filename: {filename} (backend={AI_BACKEND})")
 
