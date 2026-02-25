@@ -48,6 +48,7 @@ class JobSubmitRequest(BaseModel):
     job_type: Literal["rename", "distribution"]
     options: dict[str, Any] = Field(default_factory=dict)
     webhook_url: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class JobSubmitResponse(BaseModel):
@@ -131,6 +132,7 @@ def submit_job(tenant_id: str, matter_id: str, request: JobSubmitRequest):
         job_type=request.job_type,
         payload=request.options,
         webhook_url=request.webhook_url,
+        idempotency_key=request.idempotency_key,
     )
     return JobSubmitResponse(
         tenant_id=tenant_id,
