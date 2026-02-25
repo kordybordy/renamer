@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import threading
 import uuid
@@ -141,6 +142,12 @@ class JobRecord:
     created_at: str
     updated_at: str
     webhook_url: str | None
+    payload: dict[str, Any] = field(default_factory=dict)
+    uploaded_pdfs: list[str] = field(default_factory=list)
+    idempotency_key: str | None = None
+    retry_count: int = 0
+    max_retries: int = 3
+    failure_history: list[dict[str, Any]] = field(default_factory=list)
     result_files: list[dict[str, str]] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
     audit_path: str | None = None
@@ -168,7 +175,12 @@ class AuditEventRecord:
 
 
 class RenamerApiService:
-    def __init__(self, storage_root: str = "api_data") -> None:
+    def __init__(
+        self,
+        storage_root: str = "api_data",
+        worker_count: int = 2,
+        max_retries: int = 3,
+    ) -> None:
         self.storage_root = Path(storage_root)
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self._core = None
@@ -179,8 +191,27 @@ class RenamerApiService:
         self._matters: dict[tuple[str, str], MatterRecord] = {}
         self._documents: dict[tuple[str, str, str], DocumentRecord] = {}
         self._jobs: dict[tuple[str, str, str], JobRecord] = {}
-        self._processing_jobs: dict[tuple[str, str, str], ProcessingJobRecord] = {}
-        self._audit_events: dict[tuple[str, str], list[AuditEventRecord]] = {}
+        self._idempotency_index: dict[tuple[str, str, str], str] = {}
+        self._dead_letters: dict[tuple[str, str, str], JobRecord] = {}
+        self._job_queue: queue.Queue[str] = queue.Queue()
+        self._worker_count = max(1, worker_count)
+        self._max_retries = max(0, max_retries)
+        self._workers: list[threading.Thread] = []
+        self._start_workers()
+
+    def _start_workers(self) -> None:
+        for idx in range(self._worker_count):
+            worker = threading.Thread(target=self._worker_loop, args=(idx,), daemon=True)
+            worker.start()
+            self._workers.append(worker)
+
+    def _worker_loop(self, _: int) -> None:
+        while True:
+            job_id = self._job_queue.get()
+            try:
+                self._process_queued_job(job_id)
+            finally:
+                self._job_queue.task_done()
 
     @staticmethod
     def _default_plan_limits() -> dict[str, dict[str, float]]:
@@ -412,6 +443,7 @@ class RenamerApiService:
         job_type: str,
         payload: dict[str, Any],
         webhook_url: str | None,
+        idempotency_key: str | None = None,
     ) -> JobRecord:
         self._require_tenant_scope(tenant_id, access)
         required_permission = "rename_approval" if job_type == "rename" else "review"
@@ -434,45 +466,44 @@ class RenamerApiService:
                 details={"job_type": job_type},
             )
 
+        clean_key = (idempotency_key or "").strip() or None
+        if clean_key:
+            existing = self._find_job_by_idempotency_key(tenant_id, matter_id, clean_key)
+            if existing:
+                return existing
+
         job_id = str(uuid.uuid4())
+        now = utc_now_iso()
         job = JobRecord(
             tenant_id=tenant_id,
             matter_id=matter_id,
             job_id=job_id,
             job_type=job_type,
             status="queued",
-            created_at=utc_now_iso(),
-            updated_at=utc_now_iso(),
+            created_at=now,
+            updated_at=now,
             webhook_url=webhook_url,
+            payload=dict(payload),
+            uploaded_pdfs=uploaded_pdfs,
+            idempotency_key=clean_key,
+            max_retries=self._max_retries,
         )
         with self._lock:
             self._jobs[(tenant_id, matter_id, job_id)] = job
-            self._processing_jobs[(tenant_id, matter_id, job_id)] = ProcessingJobRecord(
-                tenant_id=tenant_id,
-                matter_id=matter_id,
-                processing_job_id=str(uuid.uuid4()),
-                job_id=job_id,
-                created_at=utc_now_iso(),
-            )
-        self._record_audit(
-            tenant_id,
-            matter_id,
-            access.user_id,
-            "job_submitted",
-            {"job_id": job_id, "job_type": job_type},
-        )
-
-        worker = threading.Thread(
-            target=self._run_job,
-            args=(job, matter, uploaded_pdfs, payload),
-            daemon=True,
-        )
-        worker.start()
+            if clean_key:
+                self._idempotency_index[(tenant_id, matter_id, clean_key)] = job_id
+        self._write_audit_log(job)
+        self._job_queue.put(job_id)
         return job
 
-    def get_job(self, access: AccessContext, tenant_id: str, matter_id: str, job_id: str) -> JobRecord:
-        self._require_tenant_scope(tenant_id, access)
-        access.require_permission("review")
+    def _find_job_by_idempotency_key(self, tenant_id: str, matter_id: str, key: str) -> JobRecord | None:
+        with self._lock:
+            job_id = self._idempotency_index.get((tenant_id, matter_id, key))
+            if not job_id:
+                return None
+            return self._jobs.get((tenant_id, matter_id, job_id))
+
+    def get_job(self, tenant_id: str, matter_id: str, job_id: str) -> JobRecord:
         job = self._jobs.get((tenant_id, matter_id, job_id))
         if not job:
             raise ApiServiceError(
@@ -532,17 +563,24 @@ class RenamerApiService:
             )
         return self._post_webhook(job)
 
-    def _run_job(self, job: JobRecord, matter: MatterRecord, uploaded_pdfs: list[str], payload: dict[str, Any]) -> None:
+    def _process_queued_job(self, job_id: str) -> None:
+        job = self._find_job_by_id(job_id)
+        if not job:
+            return
+        matter = self.get_matter(job.tenant_id, job.matter_id)
         self._set_job_status(job, "running")
         try:
             if job.job_type == "rename":
-                self._execute_rename_job(job, matter, uploaded_pdfs, payload)
+                self._execute_rename_job(job, matter, job.uploaded_pdfs, job.payload)
             else:
-                self._execute_distribution_job(job, matter, uploaded_pdfs, payload)
-            self._set_job_status(job, "completed")
+                self._execute_distribution_job(job, matter, job.uploaded_pdfs, job.payload)
+
+            if job.errors:
+                self._set_job_status(job, "needs_review")
+            else:
+                self._set_job_status(job, "completed")
         except Exception as exc:  # noqa: BLE001
-            job.errors.append({"code": "job_failed", "message": str(exc)})
-            self._set_job_status(job, "failed")
+            self._handle_job_exception(job, exc)
         finally:
             self._write_audit_log(job)
             if job.webhook_url:
@@ -550,6 +588,32 @@ class RenamerApiService:
                     self._post_webhook(job)
                 except Exception as exc:  # noqa: BLE001
                     job.errors.append({"code": "webhook_delivery_failed", "message": str(exc)})
+                    self._write_audit_log(job)
+
+    def _find_job_by_id(self, job_id: str) -> JobRecord | None:
+        with self._lock:
+            for (tenant_id, matter_id, stored_job_id), job in self._jobs.items():
+                if stored_job_id == job_id:
+                    return self._jobs.get((tenant_id, matter_id, stored_job_id))
+        return None
+
+    def _handle_job_exception(self, job: JobRecord, exc: Exception) -> None:
+        job.failure_history.append(
+            {
+                "occurred_at": utc_now_iso(),
+                "message": str(exc),
+            }
+        )
+        if job.retry_count < job.max_retries:
+            job.retry_count += 1
+            self._set_job_status(job, "queued")
+            self._job_queue.put(job.job_id)
+            return
+
+        job.errors.append({"code": "job_failed", "message": str(exc)})
+        self._set_job_status(job, "failed")
+        with self._lock:
+            self._dead_letters[(job.tenant_id, job.matter_id, job.job_id)] = job
 
     def _set_job_status(self, job: JobRecord, status: str) -> None:
         with self._lock:
@@ -576,28 +640,46 @@ class RenamerApiService:
         estimated_pages = int(payload.get("estimated_pages_per_document", 3))
         estimated_tokens = int(payload.get("ai_tokens_per_document", 1200))
 
+        processed_count = 0
+        skipped_count = 0
         for pdf_path in uploaded_pdfs:
             source_name = Path(pdf_path).name
-            response = self._core.process_document(
-                deps.RenameDocumentRequest(
-                    pdf_path=pdf_path,
-                    source_name=source_name,
-                    ocr=deps.OcrRequest(
+            try:
+                response = self._core.process_document(
+                    deps.RenameDocumentRequest(
                         pdf_path=pdf_path,
-                        enabled=ocr_enabled,
-                        char_limit=int(payload.get("ocr_char_limit", 6000)),
-                        dpi=int(payload.get("ocr_dpi", 300)),
-                        pages=int(payload.get("ocr_pages", 3)),
-                    ),
-                    ai=deps.AiMetadataRequest(
-                        ocr_text="",
-                        backend=backend,
-                        custom_elements=custom_elements,
-                        turbo_mode=turbo_mode,
-                    ),
-                    template_elements=template_elements,
-                    plaintiff_surname_first=bool(payload.get("plaintiff_surname_first", False)),
-                    defendant_surname_first=bool(payload.get("defendant_surname_first", False)),
+                        source_name=source_name,
+                        ocr=deps.OcrRequest(
+                            pdf_path=pdf_path,
+                            enabled=ocr_enabled,
+                            char_limit=int(payload.get("ocr_char_limit", 6000)),
+                            dpi=int(payload.get("ocr_dpi", 300)),
+                            pages=int(payload.get("ocr_pages", 3)),
+                        ),
+                        ai=deps.AiMetadataRequest(
+                            ocr_text="",
+                            backend=backend,
+                            custom_elements=custom_elements,
+                            turbo_mode=turbo_mode,
+                        ),
+                        template_elements=template_elements,
+                        plaintiff_surname_first=bool(payload.get("plaintiff_surname_first", False)),
+                        defendant_surname_first=bool(payload.get("defendant_surname_first", False)),
+                    )
+                )
+                target_name = f"{response.filename}.pdf"
+                target_path = result_dir / target_name
+                shutil.copy2(pdf_path, target_path)
+                job.result_files.append({"name": target_name, "path": str(target_path), "source": source_name})
+                processed_count += 1
+            except Exception as exc:  # noqa: BLE001
+                skipped_count += 1
+                job.errors.append(
+                    {
+                        "code": "document_processing_failed",
+                        "message": str(exc),
+                        "document": source_name,
+                    }
                 )
             )
             target_name = f"{response.filename}.pdf"
@@ -610,8 +692,9 @@ class RenamerApiService:
             self._increment_usage(tenant, "ai_tokens", estimated_tokens)
 
         job.summary = {
-            "processed": len(uploaded_pdfs),
+            "processed": processed_count,
             "results": len(job.result_files),
+            "skipped": skipped_count,
         }
 
     def _execute_distribution_job(
@@ -642,27 +725,57 @@ class RenamerApiService:
         audit_dir.mkdir(parents=True, exist_ok=True)
         plan_audit_path = audit_dir / f"{job.job_id}_plan.json"
 
-        plan_response = self._core.plan_distribution(
-            deps.DistributionPlanRequest(
-                input_dir=matter.input_dir,
-                pdf_files=uploaded_pdfs,
-                case_root=case_root,
-                config=cfg,
-                ai_provider=cfg.ai_provider,
-                audit_log_path=str(plan_audit_path),
+        planned_items = []
+        skipped_count = 0
+        for pdf_path in uploaded_pdfs:
+            source_name = Path(pdf_path).name
+            try:
+                item_audit_path = audit_dir / f"{job.job_id}_{Path(pdf_path).stem}_plan.json"
+                plan_response = self._core.plan_distribution(
+                    deps.DistributionPlanRequest(
+                        input_dir=matter.input_dir,
+                        pdf_files=[pdf_path],
+                        case_root=case_root,
+                        config=cfg,
+                        ai_provider=cfg.ai_provider,
+                        audit_log_path=str(item_audit_path),
+                    )
+                )
+                planned_items.extend(plan_response.plan)
+            except Exception as exc:  # noqa: BLE001
+                skipped_count += 1
+                job.errors.append(
+                    {
+                        "code": "distribution_document_failed",
+                        "message": str(exc),
+                        "document": source_name,
+                    }
+                )
+
+        with open(plan_audit_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "job_id": job.job_id,
+                    "planned_items": len(planned_items),
+                    "skipped": skipped_count,
+                    "errors": job.errors,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
             )
-        )
 
         job.summary = {
-            "planned": len(plan_response.plan),
-            "auto_candidates": sum(1 for item in plan_response.plan if item.status == "auto"),
+            "planned": len(planned_items),
+            "auto_candidates": sum(1 for item in planned_items if item.status == "auto"),
+            "skipped": skipped_count,
         }
         tenant = self._ensure_tenant(job.tenant_id)
         self._increment_usage(tenant, "documents_processed", len(uploaded_pdfs))
         if bool(payload.get("enable_ai_tiebreaker", False)):
             self._increment_usage(tenant, "ai_tokens", len(uploaded_pdfs) * int(payload.get("ai_tokens_per_document", 200)))
 
-        if bool(payload.get("apply", False)):
+        if bool(payload.get("apply", False)) and planned_items:
             apply_audit_path = audit_dir / f"{job.job_id}_apply.json"
             self._core.apply_distribution_plan(
                 deps.DistributionApplyRequest(
@@ -670,7 +783,7 @@ class RenamerApiService:
                     case_root=case_root,
                     config=cfg,
                     ai_provider=cfg.ai_provider,
-                    plan=plan_response.plan,
+                    plan=planned_items,
                     auto_only=bool(payload.get("auto_only", False)),
                     audit_log_path=str(apply_audit_path),
                 )
@@ -683,10 +796,12 @@ class RenamerApiService:
         audit_dir = self.storage_root / job.tenant_id / job.matter_id / "audit"
         audit_dir.mkdir(parents=True, exist_ok=True)
         audit_path = audit_dir / f"{job.job_id}_job.json"
+        dead_lettered = (job.tenant_id, job.matter_id, job.job_id) in self._dead_letters
         with open(audit_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
                     "job": asdict(job),
+                    "dead_lettered": dead_lettered,
                     "written_at": utc_now_iso(),
                 },
                 handle,
