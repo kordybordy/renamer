@@ -5,3 +5,7 @@ pytesseract
 requests
 pyinstaller>=6.0
 websocket-client
+
+fastapi
+uvicorn
+python-multipart
