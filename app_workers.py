@@ -118,6 +118,7 @@ class FileProcessWorker(QThread):
                     "raw_meta": raw_meta,
                     "filename": filename,
                     "char_count": len(ocr_text),
+                    "source_pdf": self.pdf_path,
                 },
             )
         except Exception as e:

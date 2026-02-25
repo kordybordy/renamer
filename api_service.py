@@ -8,6 +8,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,40 @@ class ApiServiceError(Exception):
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class UserRole(str, Enum):
+    FIRM_ADMIN = "firm_admin"
+    ATTORNEY = "attorney"
+    PARALEGAL = "paralegal"
+    REVIEWER = "reviewer"
+    BILLING_ADMIN = "billing_admin"
+
+
+PERMISSION_MATRIX: dict[UserRole, set[str]] = {
+    UserRole.FIRM_ADMIN: {"upload", "review", "rename_approval", "export"},
+    UserRole.ATTORNEY: {"upload", "review", "rename_approval", "export"},
+    UserRole.PARALEGAL: {"upload", "review"},
+    UserRole.REVIEWER: {"review"},
+    UserRole.BILLING_ADMIN: {"export"},
+}
+
+
+@dataclass(frozen=True)
+class AccessContext:
+    tenant_id: str
+    user_id: str
+    role: UserRole
+
+    def require_permission(self, permission: str) -> None:
+        allowed = PERMISSION_MATRIX.get(self.role, set())
+        if permission not in allowed:
+            raise ApiServiceError(
+                code="forbidden",
+                message="User does not have permission for this operation.",
+                status_code=403,
+                details={"permission": permission, "role": self.role.value},
+            )
 
 
 class _CoreDeps:
@@ -57,6 +92,22 @@ class _CoreDeps:
 
 
 @dataclass
+class TenantRecord:
+    tenant_id: str
+    name: str
+    created_at: str
+
+
+@dataclass
+class FirmUserRecord:
+    tenant_id: str
+    user_id: str
+    email: str
+    role: UserRole
+    created_at: str
+
+
+@dataclass
 class MatterRecord:
     tenant_id: str
     matter_id: str
@@ -64,6 +115,16 @@ class MatterRecord:
     metadata: dict[str, Any]
     created_at: str
     input_dir: str
+
+
+@dataclass
+class DocumentRecord:
+    tenant_id: str
+    matter_id: str
+    document_id: str
+    original_name: str
+    file_path: str
+    created_at: str
 
 
 @dataclass
@@ -88,6 +149,26 @@ class JobRecord:
     summary: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ProcessingJobRecord:
+    tenant_id: str
+    matter_id: str
+    processing_job_id: str
+    job_id: str
+    created_at: str
+
+
+@dataclass
+class AuditEventRecord:
+    tenant_id: str
+    matter_id: str
+    event_id: str
+    actor_user_id: str
+    action: str
+    created_at: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 class RenamerApiService:
     def __init__(
         self,
@@ -100,7 +181,10 @@ class RenamerApiService:
         self._core = None
         self._deps = None
         self._lock = threading.Lock()
+        self._tenants: dict[str, TenantRecord] = {}
+        self._firm_users: dict[tuple[str, str], FirmUserRecord] = {}
         self._matters: dict[tuple[str, str], MatterRecord] = {}
+        self._documents: dict[tuple[str, str, str], DocumentRecord] = {}
         self._jobs: dict[tuple[str, str, str], JobRecord] = {}
         self._idempotency_index: dict[tuple[str, str, str], str] = {}
         self._dead_letters: dict[tuple[str, str, str], JobRecord] = {}
@@ -131,7 +215,51 @@ class RenamerApiService:
             self._core = self._deps.CoreApplicationService()
         return self._deps
 
-    def create_matter(self, tenant_id: str, name: str, metadata: dict[str, Any] | None) -> MatterRecord:
+    def _require_tenant_scope(self, tenant_id: str, access: AccessContext) -> None:
+        if tenant_id != access.tenant_id:
+            raise ApiServiceError(
+                code="cross_tenant_access_denied",
+                message="Cross-tenant access is not allowed.",
+                status_code=403,
+            )
+
+    def _ensure_tenant(self, tenant_id: str) -> TenantRecord:
+        tenant = self._tenants.get(tenant_id)
+        if tenant is None:
+            tenant = TenantRecord(tenant_id=tenant_id, name=tenant_id, created_at=utc_now_iso())
+            self._tenants[tenant_id] = tenant
+        return tenant
+
+    def upsert_firm_user(self, tenant_id: str, user_id: str, email: str, role: UserRole) -> FirmUserRecord:
+        self._ensure_tenant(tenant_id)
+        user = FirmUserRecord(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            email=email,
+            role=role,
+            created_at=utc_now_iso(),
+        )
+        with self._lock:
+            self._firm_users[(tenant_id, user_id)] = user
+        return user
+
+    def _record_audit(self, tenant_id: str, matter_id: str, actor_user_id: str, action: str, details: dict[str, Any]) -> None:
+        event = AuditEventRecord(
+            tenant_id=tenant_id,
+            matter_id=matter_id,
+            event_id=str(uuid.uuid4()),
+            actor_user_id=actor_user_id,
+            action=action,
+            details=details,
+            created_at=utc_now_iso(),
+        )
+        with self._lock:
+            self._audit_events.setdefault((tenant_id, matter_id), []).append(event)
+
+    def create_matter(self, access: AccessContext, tenant_id: str, name: str, metadata: dict[str, Any] | None) -> MatterRecord:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("upload")
+        self._ensure_tenant(tenant_id)
         matter_id = str(uuid.uuid4())
         matter_dir = self.storage_root / tenant_id / matter_id
         input_dir = matter_dir / "uploads"
@@ -146,9 +274,11 @@ class RenamerApiService:
         )
         with self._lock:
             self._matters[(tenant_id, matter_id)] = matter
+        self._record_audit(tenant_id, matter_id, access.user_id, "matter_created", {"name": name})
         return matter
 
-    def get_matter(self, tenant_id: str, matter_id: str) -> MatterRecord:
+    def get_matter(self, access: AccessContext, tenant_id: str, matter_id: str) -> MatterRecord:
+        self._require_tenant_scope(tenant_id, access)
         matter = self._matters.get((tenant_id, matter_id))
         if not matter:
             raise ApiServiceError(
@@ -158,8 +288,10 @@ class RenamerApiService:
             )
         return matter
 
-    def store_uploads(self, tenant_id: str, matter_id: str, files: list[tuple[str, bytes]]) -> list[str]:
-        matter = self.get_matter(tenant_id, matter_id)
+    def store_uploads(self, access: AccessContext, tenant_id: str, matter_id: str, files: list[tuple[str, bytes]]) -> list[str]:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("upload")
+        matter = self.get_matter(access, tenant_id, matter_id)
         stored: list[str] = []
         for filename, content in files:
             lower_name = filename.lower()
@@ -173,10 +305,22 @@ class RenamerApiService:
             target = Path(matter.input_dir) / Path(filename).name
             target.write_bytes(content)
             stored.append(target.name)
+            document = DocumentRecord(
+                tenant_id=tenant_id,
+                matter_id=matter_id,
+                document_id=str(uuid.uuid4()),
+                original_name=target.name,
+                file_path=str(target),
+                created_at=utc_now_iso(),
+            )
+            with self._lock:
+                self._documents[(tenant_id, matter_id, document.document_id)] = document
+        self._record_audit(tenant_id, matter_id, access.user_id, "files_uploaded", {"count": len(stored)})
         return stored
 
     def submit_job(
         self,
+        access: AccessContext,
         tenant_id: str,
         matter_id: str,
         job_type: str,
@@ -184,7 +328,10 @@ class RenamerApiService:
         webhook_url: str | None,
         idempotency_key: str | None = None,
     ) -> JobRecord:
-        matter = self.get_matter(tenant_id, matter_id)
+        self._require_tenant_scope(tenant_id, access)
+        required_permission = "rename_approval" if job_type == "rename" else "review"
+        access.require_permission(required_permission)
+        matter = self.get_matter(access, tenant_id, matter_id)
         uploaded_pdfs = sorted(str(path) for path in Path(matter.input_dir).glob("*.pdf"))
         if not uploaded_pdfs:
             raise ApiServiceError(
@@ -247,8 +394,17 @@ class RenamerApiService:
             )
         return job
 
-    def get_result_file_path(self, tenant_id: str, matter_id: str, job_id: str, result_name: str) -> str:
-        job = self.get_job(tenant_id, matter_id, job_id)
+    def get_result_file_path(
+        self,
+        access: AccessContext,
+        tenant_id: str,
+        matter_id: str,
+        job_id: str,
+        result_name: str,
+    ) -> str:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("export")
+        job = self.get_job(access, tenant_id, matter_id, job_id)
         for item in job.result_files:
             if item.get("name") == result_name:
                 path = item.get("path")
@@ -261,8 +417,10 @@ class RenamerApiService:
             details={"result_name": result_name},
         )
 
-    def get_audit(self, tenant_id: str, matter_id: str, job_id: str) -> dict[str, Any]:
-        job = self.get_job(tenant_id, matter_id, job_id)
+    def get_audit(self, access: AccessContext, tenant_id: str, matter_id: str, job_id: str) -> dict[str, Any]:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("review")
+        job = self.get_job(access, tenant_id, matter_id, job_id)
         if not job.audit_path or not os.path.isfile(job.audit_path):
             raise ApiServiceError(
                 code="audit_not_ready",
@@ -270,10 +428,14 @@ class RenamerApiService:
                 status_code=404,
             )
         with open(job.audit_path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+            result = json.load(handle)
+        result["events"] = [asdict(item) for item in self._audit_events.get((tenant_id, matter_id), [])]
+        return result
 
-    def trigger_callback(self, tenant_id: str, matter_id: str, job_id: str) -> dict[str, Any]:
-        job = self.get_job(tenant_id, matter_id, job_id)
+    def trigger_callback(self, access: AccessContext, tenant_id: str, matter_id: str, job_id: str) -> dict[str, Any]:
+        self._require_tenant_scope(tenant_id, access)
+        access.require_permission("review")
+        job = self.get_job(access, tenant_id, matter_id, job_id)
         if not job.webhook_url:
             raise ApiServiceError(
                 code="webhook_not_configured",
