@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Path, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Path, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from api_service import ApiServiceError, RenamerApiService
@@ -38,6 +38,8 @@ class MatterCreateResponse(BaseModel):
     name: str
     metadata: dict[str, Any]
     created_at: str
+    encryption: dict[str, Any]
+    retention: dict[str, Any]
 
 
 class UploadResponse(BaseModel):
@@ -77,10 +79,33 @@ class WebhookRetryResponse(BaseModel):
     delivered_at: str
 
 
+class LegalHoldRequest(BaseModel):
+    enabled: bool
+
+
+class LegalHoldResponse(BaseModel):
+    tenant_id: str
+    matter_id: str
+    legal_hold: bool
+
+
 @app.exception_handler(ApiServiceError)
 async def handle_api_service_error(_: Request, exc: ApiServiceError):
     body = ErrorResponse(code=exc.code, message=exc.message, details=exc.details).model_dump()
     return JSONResponse(status_code=exc.status_code, content=body)
+
+
+@app.middleware("http")
+async def enforce_tls(request: Request, call_next):
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    if request.url.scheme != "https" and forwarded_proto.lower() != "https":
+        return JSONResponse(
+            status_code=400,
+            content={"code": "tls_required", "message": "TLS is required for all API traffic.", "details": {}},
+        )
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 @app.post(
@@ -97,6 +122,8 @@ def create_matter(tenant_id: str, request: MatterCreateRequest):
         name=matter.name,
         metadata=matter.metadata,
         created_at=matter.created_at,
+        encryption={"at_rest": True, "kms_key_id": matter.encryption_key_id},
+        retention={"ocr_ai_days": matter.retention_days, "legal_hold": matter.legal_hold},
     )
 
 
@@ -186,8 +213,12 @@ def download_result(
     job_id: str,
     result_name: str = Path(..., description="File name returned in job result_files"),
 ):
-    path = service.get_result_file_path(tenant_id, matter_id, job_id, result_name)
-    return FileResponse(path=path, filename=result_name, media_type="application/pdf")
+    payload = service.read_result_file(tenant_id, matter_id, job_id, result_name)
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{result_name}"'},
+    )
 
 
 @app.get(
@@ -197,3 +228,44 @@ def download_result(
 )
 def get_audit(tenant_id: str, matter_id: str, job_id: str):
     return service.get_audit(tenant_id, matter_id, job_id)
+
+
+@app.delete(
+    "/api/v1/tenants/{tenant_id}/matters/{matter_id}/files/{file_name}",
+    responses={404: {"model": ErrorResponse}},
+    tags=["files"],
+)
+def delete_upload(
+    tenant_id: str,
+    matter_id: str,
+    file_name: str = Path(..., description="Uploaded file name"),
+):
+    service.delete_upload(tenant_id, matter_id, file_name)
+    return {"deleted": file_name}
+
+
+@app.post(
+    "/api/v1/tenants/{tenant_id}/matters/{matter_id}/legal-hold",
+    response_model=LegalHoldResponse,
+    responses={404: {"model": ErrorResponse}},
+    tags=["matters"],
+)
+def set_legal_hold(tenant_id: str, matter_id: str, request: LegalHoldRequest):
+    matter = service.set_legal_hold(tenant_id, matter_id, request.enabled)
+    return LegalHoldResponse(tenant_id=tenant_id, matter_id=matter_id, legal_hold=matter.legal_hold)
+
+
+@app.get(
+    "/api/v1/tenants/{tenant_id}/matters/{matter_id}/audit-report",
+    responses={404: {"model": ErrorResponse}},
+    tags=["results"],
+)
+def download_audit_report(tenant_id: str, matter_id: str):
+    path = service.export_matter_audit_report(tenant_id, matter_id)
+    with open(path, "rb") as handle:
+        payload = handle.read()
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="audit_report.json"'},
+    )
