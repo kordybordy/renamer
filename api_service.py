@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -25,6 +28,10 @@ class ApiServiceError(Exception):
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def monotonic_now() -> float:
+    return time.perf_counter()
 
 
 class UserRole(str, Enum):
@@ -69,6 +76,7 @@ class _CoreDeps:
                 CoreApplicationService,
                 DistributionApplyRequest,
                 DistributionPlanRequest,
+                FilenameBuildRequest,
                 OcrRequest,
                 RenameDocumentRequest,
             )
@@ -85,6 +93,7 @@ class _CoreDeps:
         self.CoreApplicationService = CoreApplicationService
         self.DistributionApplyRequest = DistributionApplyRequest
         self.DistributionPlanRequest = DistributionPlanRequest
+        self.FilenameBuildRequest = FilenameBuildRequest
         self.OcrRequest = OcrRequest
         self.RenameDocumentRequest = RenameDocumentRequest
         self.DistributionConfig = DistributionConfig
@@ -176,6 +185,82 @@ class RenamerApiService:
         self._jobs: dict[tuple[str, str, str], JobRecord] = {}
         self._processing_jobs: dict[tuple[str, str, str], ProcessingJobRecord] = {}
         self._audit_events: dict[tuple[str, str], list[AuditEventRecord]] = {}
+        self._metrics: dict[str, Any] = {
+            "jobs_submitted": 0,
+            "jobs_completed": 0,
+            "jobs_failed": 0,
+            "documents_processed": 0,
+            "documents_failed": 0,
+            "queue_latency_seconds": [],
+            "ocr_time_seconds": [],
+            "ai_time_seconds": [],
+            "document_cost_usd": [],
+            "provider_failures": {},
+        }
+        self._default_rates = {
+            "openai": float(os.getenv("RENAMER_OPENAI_COST_PER_1K_CHARS", "0.0005")),
+            "ollama": float(os.getenv("RENAMER_OLLAMA_COST_PER_1K_CHARS", "0")),
+        }
+
+    def _emit_log(self, event: str, **fields: Any) -> None:
+        payload = {
+            "ts": utc_now_iso(),
+            "event": event,
+            **fields,
+        }
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _new_trace_id(self) -> str:
+        return uuid.uuid4().hex
+
+    def _new_span_id(self) -> str:
+        return f"{random.getrandbits(64):016x}"
+
+    @contextmanager
+    def _trace_span(
+        self,
+        trace: dict[str, Any],
+        name: str,
+        *,
+        parent_span_id: str | None = None,
+        **attributes: Any,
+    ):
+        span_id = self._new_span_id()
+        started = monotonic_now()
+        span = {
+            "trace_id": trace["trace_id"],
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "name": name,
+            "status": "ok",
+            "start": utc_now_iso(),
+            "attributes": attributes,
+        }
+        self._emit_log("trace.span.start", **span)
+        try:
+            yield span
+        except Exception as exc:  # noqa: BLE001
+            span["status"] = "error"
+            span["error"] = str(exc)
+            raise
+        finally:
+            span["duration_seconds"] = round(monotonic_now() - started, 6)
+            span["end"] = utc_now_iso()
+            trace.setdefault("spans", []).append(span)
+            self._emit_log("trace.span.finish", **span)
+
+    def _append_metric(self, key: str, value: float) -> None:
+        if value < 0:
+            value = 0
+        self._metrics[key].append(float(value))
+
+    def _record_provider_failure(self, provider: str) -> None:
+        failures = self._metrics["provider_failures"]
+        failures[provider] = int(failures.get(provider, 0)) + 1
+
+    def _estimate_document_cost(self, *, backend: str, char_count: int) -> float:
+        rate = self._default_rates.get(backend, self._default_rates.get("openai", 0.0))
+        return round((max(char_count, 0) / 1000.0) * rate, 6)
 
     def _ensure_core(self):
         if self._deps is None:
@@ -274,6 +359,14 @@ class RenamerApiService:
             target = Path(matter.input_dir) / Path(filename).name
             target.write_bytes(content)
             stored.append(target.name)
+            self._emit_log(
+                "storage.uploaded",
+                tenant_id=tenant_id,
+                matter_id=matter_id,
+                user_id=access.user_id,
+                filename=target.name,
+                bytes=len(content),
+            )
             document = DocumentRecord(
                 tenant_id=tenant_id,
                 matter_id=matter_id,
@@ -295,6 +388,7 @@ class RenamerApiService:
         job_type: str,
         payload: dict[str, Any],
         webhook_url: str | None,
+        correlation_id: str | None = None,
     ) -> JobRecord:
         self._require_tenant_scope(tenant_id, access)
         required_permission = "rename_approval" if job_type == "rename" else "review"
@@ -316,6 +410,7 @@ class RenamerApiService:
             )
 
         job_id = str(uuid.uuid4())
+        trace_id = self._new_trace_id()
         job = JobRecord(
             tenant_id=tenant_id,
             matter_id=matter_id,
@@ -335,6 +430,7 @@ class RenamerApiService:
                 job_id=job_id,
                 created_at=utc_now_iso(),
             )
+            self._metrics["jobs_submitted"] += 1
         self._record_audit(
             tenant_id,
             matter_id,
@@ -342,10 +438,20 @@ class RenamerApiService:
             "job_submitted",
             {"job_id": job_id, "job_type": job_type},
         )
+        self._emit_log(
+            "job.submitted",
+            correlation_id=correlation_id,
+            trace_id=trace_id,
+            job_id=job_id,
+            tenant_id=tenant_id,
+            matter_id=matter_id,
+            job_type=job_type,
+            queue_depth=sum(1 for item in self._jobs.values() if item.status in {"queued", "running"}),
+        )
 
         worker = threading.Thread(
             target=self._run_job,
-            args=(job, matter, uploaded_pdfs, payload),
+            args=(job, matter, uploaded_pdfs, payload, correlation_id, trace_id),
             daemon=True,
         )
         worker.start()
@@ -413,18 +519,53 @@ class RenamerApiService:
             )
         return self._post_webhook(job)
 
-    def _run_job(self, job: JobRecord, matter: MatterRecord, uploaded_pdfs: list[str], payload: dict[str, Any]) -> None:
+    def _run_job(
+        self,
+        job: JobRecord,
+        matter: MatterRecord,
+        uploaded_pdfs: list[str],
+        payload: dict[str, Any],
+        correlation_id: str | None,
+        trace_id: str,
+    ) -> None:
+        queue_latency = max((datetime.now(timezone.utc) - datetime.fromisoformat(job.created_at)).total_seconds(), 0.0)
+        self._append_metric("queue_latency_seconds", queue_latency)
         self._set_job_status(job, "running")
+        trace: dict[str, Any] = {"trace_id": trace_id, "spans": []}
         try:
-            if job.job_type == "rename":
-                self._execute_rename_job(job, matter, uploaded_pdfs, payload)
-            else:
-                self._execute_distribution_job(job, matter, uploaded_pdfs, payload)
+            with self._trace_span(trace, "job.run", correlation_id=correlation_id, job_id=job.job_id) as root_span:
+                if job.job_type == "rename":
+                    self._execute_rename_job(
+                        job,
+                        matter,
+                        uploaded_pdfs,
+                        payload,
+                        trace=trace,
+                        correlation_id=correlation_id,
+                        parent_span_id=root_span["span_id"],
+                    )
+                else:
+                    self._execute_distribution_job(
+                        job,
+                        matter,
+                        uploaded_pdfs,
+                        payload,
+                        trace=trace,
+                        correlation_id=correlation_id,
+                        parent_span_id=root_span["span_id"],
+                    )
             self._set_job_status(job, "completed")
+            self._metrics["jobs_completed"] += 1
         except Exception as exc:  # noqa: BLE001
             job.errors.append({"code": "job_failed", "message": str(exc)})
             self._set_job_status(job, "failed")
+            self._metrics["jobs_failed"] += 1
+            provider = str(payload.get("backend") or payload.get("ai_provider") or "unknown")
+            self._record_provider_failure(provider)
         finally:
+            job.summary.setdefault("trace", {})
+            job.summary["trace"]["trace_id"] = trace_id
+            job.summary["trace"]["span_count"] = len(trace.get("spans", []))
             self._write_audit_log(job)
             if job.webhook_url:
                 try:
@@ -443,6 +584,10 @@ class RenamerApiService:
         matter: MatterRecord,
         uploaded_pdfs: list[str],
         payload: dict[str, Any],
+        *,
+        trace: dict[str, Any],
+        correlation_id: str | None,
+        parent_span_id: str | None,
     ) -> None:
         deps = self._ensure_core()
         backend = str(payload.get("backend") or "openai")
@@ -454,38 +599,126 @@ class RenamerApiService:
         result_dir = Path(matter.input_dir).parent / "results" / job.job_id
         result_dir.mkdir(parents=True, exist_ok=True)
 
+        total_ocr_time = 0.0
+        total_ai_time = 0.0
+        total_cost = 0.0
+        failed_documents = 0
         for pdf_path in uploaded_pdfs:
             source_name = Path(pdf_path).name
-            response = self._core.process_document(
-                deps.RenameDocumentRequest(
-                    pdf_path=pdf_path,
+            try:
+                with self._trace_span(
+                    trace,
+                    "document.process",
+                    parent_span_id=parent_span_id,
+                    correlation_id=correlation_id,
+                    job_id=job.job_id,
                     source_name=source_name,
-                    ocr=deps.OcrRequest(
-                        pdf_path=pdf_path,
-                        enabled=ocr_enabled,
-                        char_limit=int(payload.get("ocr_char_limit", 6000)),
-                        dpi=int(payload.get("ocr_dpi", 300)),
-                        pages=int(payload.get("ocr_pages", 3)),
-                    ),
-                    ai=deps.AiMetadataRequest(
-                        ocr_text="",
+                ) as document_span:
+                    with self._trace_span(trace, "ocr", parent_span_id=document_span["span_id"], source_name=source_name):
+                        ocr_started = monotonic_now()
+                        ocr_response = self._core.run_ocr(
+                            deps.OcrRequest(
+                                pdf_path=pdf_path,
+                                enabled=ocr_enabled,
+                                char_limit=int(payload.get("ocr_char_limit", 6000)),
+                                dpi=int(payload.get("ocr_dpi", 300)),
+                                pages=int(payload.get("ocr_pages", 3)),
+                            )
+                        )
+                        ocr_elapsed = monotonic_now() - ocr_started
+                    self._append_metric("ocr_time_seconds", ocr_elapsed)
+                    total_ocr_time += ocr_elapsed
+
+                    with self._trace_span(
+                        trace,
+                        "ai.extract_metadata",
+                        parent_span_id=document_span["span_id"],
                         backend=backend,
-                        custom_elements=custom_elements,
-                        turbo_mode=turbo_mode,
-                    ),
-                    template_elements=template_elements,
-                    plaintiff_surname_first=bool(payload.get("plaintiff_surname_first", False)),
-                    defendant_surname_first=bool(payload.get("defendant_surname_first", False)),
+                        source_name=source_name,
+                    ):
+                        ai_started = monotonic_now()
+                        metadata_response = self._core.extract_metadata(
+                            deps.AiMetadataRequest(
+                                ocr_text=ocr_response.text,
+                                backend=backend,
+                                custom_elements=custom_elements,
+                                turbo_mode=turbo_mode,
+                            )
+                        )
+                        ai_elapsed = monotonic_now() - ai_started
+                    self._append_metric("ai_time_seconds", ai_elapsed)
+                    total_ai_time += ai_elapsed
+
+                    raw_meta = metadata_response.metadata.copy()
+                    if not raw_meta.get("defendant"):
+                        from app_text_utils import defendant_from_filename
+
+                        fallback_defendant = defendant_from_filename(source_name)
+                        if fallback_defendant:
+                            raw_meta["defendant"] = fallback_defendant
+
+                    filename_response = self._core.generate_filename(
+                        deps.FilenameBuildRequest(
+                            meta=raw_meta,
+                            template_elements=template_elements,
+                            custom_elements=custom_elements,
+                            plaintiff_surname_first=bool(payload.get("plaintiff_surname_first", False)),
+                            defendant_surname_first=bool(payload.get("defendant_surname_first", False)),
+                        )
+                    )
+
+                    target_name = f"{filename_response.filename}.pdf"
+                    target_path = result_dir / target_name
+                    with self._trace_span(trace, "storage.copy", parent_span_id=document_span["span_id"], target=str(target_path)):
+                        shutil.copy2(pdf_path, target_path)
+                    job.result_files.append({"name": target_name, "path": str(target_path), "source": source_name})
+
+                    document_cost = self._estimate_document_cost(backend=backend, char_count=ocr_response.char_count)
+                    self._append_metric("document_cost_usd", document_cost)
+                    total_cost += document_cost
+                    self._metrics["documents_processed"] += 1
+
+                    self._emit_log(
+                        "document.processed",
+                        correlation_id=correlation_id,
+                        trace_id=trace["trace_id"],
+                        job_id=job.job_id,
+                        source_name=source_name,
+                        backend=backend,
+                        ocr_time_seconds=round(ocr_elapsed, 4),
+                        ai_time_seconds=round(ai_elapsed, 4),
+                        estimated_cost_usd=document_cost,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._metrics["documents_failed"] += 1
+                failed_documents += 1
+                self._record_provider_failure(backend)
+                job.errors.append({"code": "document_failed", "message": str(exc), "source": source_name})
+                self._emit_log(
+                    "document.failed",
+                    correlation_id=correlation_id,
+                    trace_id=trace["trace_id"],
+                    job_id=job.job_id,
+                    source_name=source_name,
+                    backend=backend,
+                    error=str(exc),
                 )
+                continue
+
+        if not job.result_files:
+            raise ApiServiceError(
+                code="all_documents_failed",
+                message="All documents failed to process.",
+                status_code=500,
             )
-            target_name = f"{response.filename}.pdf"
-            target_path = result_dir / target_name
-            shutil.copy2(pdf_path, target_path)
-            job.result_files.append({"name": target_name, "path": str(target_path), "source": source_name})
 
         job.summary = {
             "processed": len(uploaded_pdfs),
             "results": len(job.result_files),
+            "failed_documents": failed_documents,
+            "ocr_time_seconds": round(total_ocr_time, 4),
+            "ai_time_seconds": round(total_ai_time, 4),
+            "estimated_cost_usd": round(total_cost, 6),
         }
 
     def _execute_distribution_job(
@@ -494,6 +727,10 @@ class RenamerApiService:
         matter: MatterRecord,
         uploaded_pdfs: list[str],
         payload: dict[str, Any],
+        *,
+        trace: dict[str, Any],
+        correlation_id: str | None,
+        parent_span_id: str | None,
     ) -> None:
         case_root = str(payload.get("case_root") or "").strip()
         if not case_root:
@@ -516,16 +753,17 @@ class RenamerApiService:
         audit_dir.mkdir(parents=True, exist_ok=True)
         plan_audit_path = audit_dir / f"{job.job_id}_plan.json"
 
-        plan_response = self._core.plan_distribution(
-            deps.DistributionPlanRequest(
-                input_dir=matter.input_dir,
-                pdf_files=uploaded_pdfs,
-                case_root=case_root,
-                config=cfg,
-                ai_provider=cfg.ai_provider,
-                audit_log_path=str(plan_audit_path),
+        with self._trace_span(trace, "distribution.plan", parent_span_id=parent_span_id, correlation_id=correlation_id):
+            plan_response = self._core.plan_distribution(
+                deps.DistributionPlanRequest(
+                    input_dir=matter.input_dir,
+                    pdf_files=uploaded_pdfs,
+                    case_root=case_root,
+                    config=cfg,
+                    ai_provider=cfg.ai_provider,
+                    audit_log_path=str(plan_audit_path),
+                )
             )
-        )
 
         job.summary = {
             "planned": len(plan_response.plan),
@@ -534,17 +772,18 @@ class RenamerApiService:
 
         if bool(payload.get("apply", False)):
             apply_audit_path = audit_dir / f"{job.job_id}_apply.json"
-            self._core.apply_distribution_plan(
-                deps.DistributionApplyRequest(
-                    input_dir=matter.input_dir,
-                    case_root=case_root,
-                    config=cfg,
-                    ai_provider=cfg.ai_provider,
-                    plan=plan_response.plan,
-                    auto_only=bool(payload.get("auto_only", False)),
-                    audit_log_path=str(apply_audit_path),
+            with self._trace_span(trace, "distribution.apply", parent_span_id=parent_span_id, correlation_id=correlation_id):
+                self._core.apply_distribution_plan(
+                    deps.DistributionApplyRequest(
+                        input_dir=matter.input_dir,
+                        case_root=case_root,
+                        config=cfg,
+                        ai_provider=cfg.ai_provider,
+                        plan=plan_response.plan,
+                        auto_only=bool(payload.get("auto_only", False)),
+                        audit_log_path=str(apply_audit_path),
+                    )
                 )
-            )
             job.summary["apply_audit"] = str(apply_audit_path)
 
         job.audit_path = str(plan_audit_path)
@@ -565,6 +804,52 @@ class RenamerApiService:
             )
         if not job.audit_path:
             job.audit_path = str(audit_path)
+
+    def get_metrics(self) -> dict[str, Any]:
+        with self._lock:
+            queue_depth = sum(1 for item in self._jobs.values() if item.status in {"queued", "running"})
+            jobs_total = max(self._metrics["jobs_submitted"], 1)
+            failure_rate = self._metrics["jobs_failed"] / jobs_total
+
+            def _avg(values: list[float]) -> float:
+                return round(sum(values) / len(values), 6) if values else 0.0
+
+            alerts: list[dict[str, Any]] = []
+            if queue_depth >= int(os.getenv("RENAMER_ALERT_BACKLOG_THRESHOLD", "10")):
+                alerts.append({"type": "backlog_growth", "severity": "warning", "queue_depth": queue_depth})
+            if failure_rate >= float(os.getenv("RENAMER_ALERT_FAILURE_RATE_THRESHOLD", "0.2")):
+                alerts.append({"type": "elevated_failures", "severity": "critical", "failure_rate": round(failure_rate, 4)})
+            for provider, count in self._metrics["provider_failures"].items():
+                if count >= int(os.getenv("RENAMER_ALERT_PROVIDER_FAILURE_THRESHOLD", "3")):
+                    alerts.append({"type": "provider_outage", "severity": "critical", "provider": provider, "failures": count})
+
+            return {
+                "queue": {
+                    "depth": queue_depth,
+                    "avg_latency_seconds": _avg(self._metrics["queue_latency_seconds"]),
+                },
+                "timings": {
+                    "avg_ocr_seconds": _avg(self._metrics["ocr_time_seconds"]),
+                    "avg_ai_seconds": _avg(self._metrics["ai_time_seconds"]),
+                },
+                "failures": {
+                    "jobs_failed": self._metrics["jobs_failed"],
+                    "documents_failed": self._metrics["documents_failed"],
+                    "job_failure_rate": round(failure_rate, 6),
+                    "provider_failures": dict(self._metrics["provider_failures"]),
+                },
+                "cost": {
+                    "avg_cost_per_document_usd": _avg(self._metrics["document_cost_usd"]),
+                    "total_estimated_cost_usd": round(sum(self._metrics["document_cost_usd"]), 6),
+                },
+                "throughput": {
+                    "jobs_submitted": self._metrics["jobs_submitted"],
+                    "jobs_completed": self._metrics["jobs_completed"],
+                    "documents_processed": self._metrics["documents_processed"],
+                },
+                "alerts": alerts,
+                "generated_at": utc_now_iso(),
+            }
 
     def _post_webhook(self, job: JobRecord) -> dict[str, Any]:
         payload = {

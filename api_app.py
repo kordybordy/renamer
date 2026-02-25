@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import Any, Literal
 
-from fastapi import Cookie, Depends, FastAPI, File, Header, Path, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Header, Path, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 
@@ -31,6 +31,31 @@ JWT_AUDIENCE = "renamer-api"
 JWT_ISSUER = "renamer-auth"
 SESSION_COOKIE = "renamer_session_id"
 _session_store: dict[str, dict[str, str]] = {}
+
+
+@app.middleware("http")
+async def correlation_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("x-correlation-id") or str(uuid.uuid4())
+    request.state.correlation_id = correlation_id
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["x-correlation-id"] = correlation_id
+    duration = round(time.perf_counter() - started, 6)
+    print(
+        json.dumps(
+            {
+                "event": "request.completed",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_seconds": duration,
+                "correlation_id": correlation_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return response
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -124,6 +149,16 @@ class JobStatusResponse(BaseModel):
 class WebhookRetryResponse(BaseModel):
     status_code: int
     delivered_at: str
+
+
+class MetricsResponse(BaseModel):
+    queue: dict[str, Any]
+    timings: dict[str, Any]
+    failures: dict[str, Any]
+    cost: dict[str, Any]
+    throughput: dict[str, Any]
+    alerts: list[dict[str, Any]]
+    generated_at: str
 
 
 class LoginRequest(BaseModel):
@@ -323,7 +358,13 @@ async def upload_files(
     responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     tags=["jobs"],
 )
-def submit_job(tenant_id: str, matter_id: str, request: JobSubmitRequest, access: AccessContext = Depends(get_access_context)):
+def submit_job(
+    tenant_id: str,
+    matter_id: str,
+    request: JobSubmitRequest,
+    access: AccessContext = Depends(get_access_context),
+    correlation_id: str | None = Header(default=None, alias="x-correlation-id"),
+):
     job = service.submit_job(
         access=access,
         tenant_id=tenant_id,
@@ -331,6 +372,7 @@ def submit_job(tenant_id: str, matter_id: str, request: JobSubmitRequest, access
         job_type=request.job_type,
         payload=request.options,
         webhook_url=request.webhook_url,
+        correlation_id=correlation_id,
     )
     return JobSubmitResponse(
         tenant_id=job.tenant_id,
@@ -398,3 +440,9 @@ def download_result(
 )
 def get_audit(tenant_id: str, matter_id: str, job_id: str, access: AccessContext = Depends(get_access_context)):
     return service.get_audit(access, tenant_id, matter_id, job_id)
+
+
+@app.get("/api/v1/metrics", response_model=MetricsResponse, tags=["observability"])
+def get_metrics(access: AccessContext = Depends(get_access_context)):
+    access.require_permission("review")
+    return service.get_metrics()
