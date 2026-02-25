@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urljoin
 
@@ -25,6 +28,87 @@ _OLLAMA_REMOTE_FALLBACK_GENERATE_URL = (
 
 class OpenAIKeyMissingError(RuntimeError):
     pass
+
+
+@dataclass
+class AICallResult:
+    provider: str
+    model: str
+    content: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost_usd: float
+    prompt_id: str = "default"
+    prompt_version: str = "v1"
+    request_id: str = ""
+
+
+_OPENAI_MODEL_COST_USD_PER_1K = {
+    "gpt-5-nano": {"prompt": 0.00005, "completion": 0.0004},
+    "gpt-4.1-mini": {"prompt": 0.0004, "completion": 0.0016},
+}
+
+
+def estimate_text_tokens(text: str) -> int:
+    # Lightweight fallback estimator when provider usage is unavailable.
+    return max(1, len((text or "").strip()) // 4) if (text or "").strip() else 0
+
+
+def _estimate_openai_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    pricing = _OPENAI_MODEL_COST_USD_PER_1K.get(model)
+    if not pricing:
+        return 0.0
+    prompt_cost = (prompt_tokens / 1000.0) * pricing["prompt"]
+    completion_cost = (completion_tokens / 1000.0) * pricing["completion"]
+    return round(prompt_cost + completion_cost, 8)
+
+
+def append_ai_telemetry(record: dict, file_path: str | None = None) -> None:
+    target = (file_path or os.environ.get("AI_TELEMETRY_PATH") or "ai_telemetry.jsonl").strip()
+    if not target:
+        return
+    path = Path(target)
+    if not path.is_absolute():
+        path = Path(os.getcwd()) / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(record)
+    payload.setdefault("created_at", datetime.now(UTC).isoformat())
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def read_telemetry_totals(
+    *,
+    tenant_id: str,
+    date_yyyymmdd: str,
+    file_path: str | None = None,
+) -> dict[str, float]:
+    target = (file_path or os.environ.get("AI_TELEMETRY_PATH") or "ai_telemetry.jsonl").strip()
+    if not target:
+        return {"tokens": 0.0, "cost_usd": 0.0, "requests": 0.0}
+    path = Path(target)
+    if not path.is_absolute():
+        path = Path(os.getcwd()) / path
+    if not path.exists():
+        return {"tokens": 0.0, "cost_usd": 0.0, "requests": 0.0}
+
+    totals = {"tokens": 0.0, "cost_usd": 0.0, "requests": 0.0}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                item = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if item.get("tenant_id") != tenant_id or item.get("date") != date_yyyymmdd:
+                continue
+            totals["tokens"] += float(item.get("total_tokens") or 0)
+            totals["cost_usd"] += float(item.get("estimated_cost_usd") or 0)
+            totals["requests"] += 1.0
+    return totals
 
 
 class _OpenAIResponsesWebSocketSession:
@@ -227,7 +311,8 @@ def _call_openai(
     user_prompt: str,
     model: str,
     temperature: float | None,
-) -> str:
+    max_tokens: int | None = None,
+) -> AICallResult:
     key = _resolve_openai_key()
     client = OpenAI(api_key=key)
     payload = {
@@ -236,8 +321,29 @@ def _call_openai(
     }
     if temperature is not None:
         payload["temperature"] = temperature
+    if max_tokens is not None and max_tokens > 0:
+        payload["max_tokens"] = max_tokens
     resp = client.chat.completions.create(**payload)
-    return resp.choices[0].message.content or ""
+    content = resp.choices[0].message.content or ""
+    usage = getattr(resp, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if prompt_tokens is None:
+        prompt_tokens = estimate_text_tokens(system_prompt + "\n" + user_prompt)
+    if completion_tokens is None:
+        completion_tokens = estimate_text_tokens(content)
+    total_tokens = prompt_tokens + completion_tokens
+    request_id = getattr(resp, "id", "") or ""
+    return AICallResult(
+        provider="openai",
+        model=model,
+        content=content,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        estimated_cost_usd=_estimate_openai_cost(model, prompt_tokens, completion_tokens),
+        request_id=request_id,
+    )
 
 
 def _websocket_mode_enabled() -> bool:
@@ -265,13 +371,24 @@ def _call_openai_via_websocket(
     user_prompt: str,
     model: str,
     temperature: float | None,
-) -> str:
+) -> AICallResult:
     session = _get_ws_session()
-    return session.create_response(
+    content = session.create_response(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         model=model,
         temperature=temperature,
+    )
+    prompt_tokens = estimate_text_tokens(system_prompt + "\n" + user_prompt)
+    completion_tokens = estimate_text_tokens(content)
+    return AICallResult(
+        provider="openai",
+        model=model,
+        content=content,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        estimated_cost_usd=_estimate_openai_cost(model, prompt_tokens, completion_tokens),
     )
 
 
@@ -285,31 +402,66 @@ def call_openai_chat(
     fallback_temperature: float | None = 0.0,
     log_info: Callable[[str], None] | None = None,
 ) -> str:
+    return call_openai_chat_result(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=model,
+        fallback_model=fallback_model,
+        temperature=temperature,
+        fallback_temperature=fallback_temperature,
+        log_info=log_info,
+    ).content
+
+
+def call_openai_chat_result(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str = "gpt-5-nano",
+    fallback_model: str = "gpt-4.1-mini",
+    temperature: float | None = None,
+    fallback_temperature: float | None = 0.0,
+    max_tokens: int | None = None,
+    prompt_id: str = "default",
+    prompt_version: str = "v1",
+    log_info: Callable[[str], None] | None = None,
+) -> AICallResult:
     try:
         if _websocket_mode_enabled() and create_connection is not None:
-            return _call_openai_via_websocket(
+            result = _call_openai_via_websocket(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 model=model,
                 temperature=temperature,
             )
-        return _call_openai(
+            result.prompt_id = prompt_id
+            result.prompt_version = prompt_version
+            return result
+        result = _call_openai(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             model=model,
             temperature=temperature,
+            max_tokens=max_tokens,
         )
+        result.prompt_id = prompt_id
+        result.prompt_version = prompt_version
+        return result
     except OpenAIKeyMissingError:
         raise
     except Exception as exc:
         if log_info:
             log_info(f"OpenAI {model} failed; retrying with {fallback_model} ({exc})")
-    return _call_openai(
+    result = _call_openai(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         model=fallback_model,
         temperature=fallback_temperature,
+        max_tokens=max_tokens,
     )
+    result.prompt_id = prompt_id
+    result.prompt_version = prompt_version
+    return result
 
 
 def get_ollama_base_url() -> str:
@@ -355,6 +507,23 @@ def call_ollama_chat(
     model: str = "qwen2.5:7b",
     timeout: int = 120,
 ) -> str:
+    return call_ollama_chat_result(
+        prompt=prompt,
+        url=url,
+        model=model,
+        timeout=timeout,
+    ).content
+
+
+def call_ollama_chat_result(
+    *,
+    prompt: str,
+    url: str | None = None,
+    model: str = "qwen2.5:7b",
+    timeout: int = 120,
+    prompt_id: str = "default",
+    prompt_version: str = "v1",
+) -> AICallResult:
     endpoint = url or get_ollama_generate_url()
     payload = {
         "model": model,
@@ -383,5 +552,19 @@ def call_ollama_chat(
     body = resp.json()
     message = body.get("message", {})
     if message:
-        return message.get("content", "") or ""
-    return body.get("response", "") or ""
+        content = message.get("content", "") or ""
+    else:
+        content = body.get("response", "") or ""
+    prompt_tokens = estimate_text_tokens(prompt)
+    completion_tokens = estimate_text_tokens(content)
+    return AICallResult(
+        provider="ollama",
+        model=model,
+        content=content,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        estimated_cost_usd=0.0,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+    )
