@@ -625,9 +625,14 @@ class RenamerApiService:
 
     def delete_upload(self, tenant_id: str, matter_id: str, filename: str) -> None:
         matter = self.get_matter(tenant_id, matter_id)
-        target = Path(matter.input_dir) / Path(filename).name
-        if not target.exists():
+        requested_name = Path(filename).name
+        if not requested_name or requested_name != filename or not requested_name.lower().endswith(".pdf"):
             raise ApiServiceError(code="file_not_found", message="The requested file does not exist.", status_code=404)
+
+        target = next((path for path in Path(matter.input_dir).glob("*.pdf") if path.name == requested_name), None)
+        if target is None:
+            raise ApiServiceError(code="file_not_found", message="The requested file does not exist.", status_code=404)
+
         target.unlink()
         self._append_audit_event(matter, "delete", {"filename": target.name})
 
